@@ -1,0 +1,35 @@
+Package: safepaste
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: all
+Maintainer: Alexei Migoun <alexei.migoun@ox.security>
+Depends: python3 (>= 3.11),
+ python3-gi (>= 3.48),
+ gir1.2-gtk-4.0 (>= 4.14),
+ gir1.2-adw-1 (>= 1.5),
+ python3-xlib (>= 0.33),
+ python3-regex (>= 0.1.20221031),
+ wl-clipboard (>= 2.2),
+ libglib2.0-bin (>= 2.80)
+Description: clipboard secret-guard for the Linux desktop
+ SafePaste watches the desktop clipboard for credentials, API keys,
+ tokens, private keys and other secrets, and keeps them off the clipboard
+ by default rather than merely warning about them.
+ .
+ In the default "redact" mode, the instant a matching secret is copied
+ the clipboard is replaced with a placeholder immediately -- only
+ afterwards is a notification/dialog shown, offering to restore the
+ original for a short window. That ordering is deliberate: ignoring the
+ dialog, the dialog failing to appear, or the daemon dying mid-decision
+ all still leave the clipboard safe, because the swap already happened.
+ .
+ Detection runs entirely on this machine against a vendored Gitleaks rule
+ set plus a small number of SafePaste-specific rules; no network calls
+ are made at runtime. The package installs a per-user background daemon
+ (started automatically via a systemd user unit), an optional
+ StatusNotifierItem tray icon, a Ctrl+Alt+V on-demand "sanitise now"
+ shortcut, a D-Bus API for future integrations, and a `safepaste`
+ command-line tool (scan/redact/rules/hash) for use outside the GUI.
+ .
+ Built and tested for Ubuntu 24.04 (GNOME 46, Wayland).

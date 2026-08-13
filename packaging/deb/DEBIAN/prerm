@@ -1,0 +1,47 @@
+#!/bin/sh
+# prerm for safepaste
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        # --global disable is the mirror image of postinst's --global
+        # enable: idempotent, safe even if it was never enabled.
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl --global disable safepaste.service >/dev/null 2>&1 || true
+        fi
+
+        cat <<'EOF'
+
+Removing SafePaste.
+
+This disables the systemd user unit for future logins, but it does NOT
+stop a copy of safepaste-gui/safepaste-daemon that is already running in
+an existing session right now -- this script runs as root, with no route
+to a logged-in user's session bus. If it is currently running, stop it
+yourself first, as that user:
+
+    systemctl --user stop safepaste.service
+
+If you registered the Ctrl+Alt+V shortcut, it lives in your own GNOME
+settings (dconf), which this script deliberately does not touch -- a
+root maintainer script has no business editing your gsettings. Remove
+it yourself, as yourself:
+
+    python3 -m safepaste.hotkey remove
+
+EOF
+        ;;
+
+    upgrade|failed-upgrade)
+        # Nothing to do: the incoming version's postinst will re-enable the
+        # unit, and stopping/disabling it here would only make a running
+        # instance flap for no reason during an upgrade.
+        ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

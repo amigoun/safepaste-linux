@@ -1,0 +1,72 @@
+[Unit]
+Description=SafePaste clipboard secret guard
+# A per-user unit, not a system service: it needs the owning user's own
+# session bus, Wayland/X display and $HOME, none of which exist before
+# login. See README.md's "How it works on Wayland" section for how
+# WAYLAND_DISPLAY / DISPLAY / DBUS_SESSION_BUS_ADDRESS reach this unit.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/safepaste-gui
+Restart=on-failure
+RestartSec=5
+
+# --- hardening -----------------------------------------------------------
+# Verified caveat (measured on Ubuntu 24.04, not assumed): 24.04 enables
+# kernel.apparmor_restrict_unprivileged_userns=1 by default, and the
+# `systemd --user` manager runs AppArmor-unconfined with no profile that
+# grants it userns. Confirmed empirically here -- `unshare --user --mount`
+# for this same user fails with EPERM, and a transient --user unit carrying
+# every mount-namespacing directive below (ProtectSystem/ProtectHome/
+# PrivateTmp/ReadWritePaths/ProtectKernelTunables) started successfully but
+# applied none of them (the real $HOME stayed fully readable *and*
+# writable). They are kept regardless: they are correct, standard, and
+# genuinely effective the moment that restriction is absent or lifted (a
+# different distro, a future allow-listing profile, or
+# `sysctl kernel.apparmor_restrict_unprivileged_userns=0`), and they cost
+# nothing while inert. NoNewPrivileges= and RestrictSUIDSGID= need no
+# namespace (prctl/seccomp) and were confirmed to stay in force regardless.
+NoNewPrivileges=true
+# No setuid/setgid helper, no capability-granting exec: never a legitimate
+# need to gain privileges beyond what it started with.
+PrivateTmp=true
+# Nothing in safepaste touches /tmp; an isolated one removes it as a shared
+# attack surface with other services at no cost.
+ProtectSystem=strict
+# Nothing is written under /usr, /etc, /boot, /var, etc. -- the one real
+# write target (~/.config/safepaste) is reopened read-write below, which
+# ReadWritePaths= honours even under "strict".
+#
+# ProtectHome= is deliberately NOT set, and this is not an oversight.
+# Per systemd.exec(5) every variant of it -- true, "read-only" and "tmpfs"
+# alike -- applies to /home/, /root AND /run/user/. That last one is where
+# $XDG_RUNTIME_DIR lives, holding both the Wayland display socket
+# (wayland-0) and the D-Bus session bus socket. Hiding or read-only-mounting
+# it does not harden SafePaste, it stops it working at all: no clipboard
+# access and no bus name.
+#
+# It would be appealing to set it -- a secret guard that could itself be
+# made to read ~/.ssh is an ugly thought -- but the honest position is that
+# this process needs $HOME for its config and /run/user for its sockets, so
+# ProtectHome cannot buy anything here. Note this would have been masked on
+# Ubuntu 24.04, where the directives below are inert anyway (see above), and
+# would have broken the service on the first system where they took effect.
+ReadWritePaths=%h/.config
+# SafePaste's only on-disk state is ~/.config/safepaste/ (config.toml, the
+# SHA-256 exclusion list, an optional rules/ dir -- see
+# safepaste/config/__init__.py). That subdirectory does not exist yet on a
+# brand-new install, and ReadWritePaths= silently skips a path that is
+# missing *at unit start*, which would leave a fresh install saving into
+# the throwaway tmpfs above (invisible, gone on restart) instead of onto
+# real disk. The parent ~/.config is what's carved out instead: every
+# GNOME session has long since populated it (dconf, fontconfig, ...) by
+# the time graphical-session.target is reached, so it reliably pre-exists.
+ProtectKernelTunables=true
+# No reason to read or write /proc/sys or /sys tunables.
+RestrictSUIDSGID=true
+# SafePaste never creates a setuid/setgid file.
+
+[Install]
+WantedBy=graphical-session.target

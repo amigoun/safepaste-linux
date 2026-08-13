@@ -1,0 +1,19 @@
+# Development virtualenv. Created with --system-site-packages so that the
+# distro's PyGObject/GTK4/libadwaita are visible; see README for setup.
+.venv/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build output
+dist/
+build/
+*.deb
+*.egg-info/
+
+# Never commit a clipboard capture or a scan artefact, however it got here.
+*.clip
+scan-output.*

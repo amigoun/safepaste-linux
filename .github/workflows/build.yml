@@ -1,0 +1,198 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The detection library is deliberately free of any gi/GTK import (only the
+  # daemon and ui layers touch those), so the whole test suite runs on a bare
+  # runner with nothing but `regex` and pytest. Worth keeping that way: it makes
+  # the part that decides whether a secret leaves your machine testable without
+  # a desktop.
+  # ---------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-regex python3-pytest
+
+      - name: Run the test suite
+        run: python3 -m pytest -q
+
+      - name: Fail on any warning
+        run: python3 -m pytest -q -W error
+
+      - name: Validate the vendored rule set offline
+        # Checks the committed gitleaks.toml still matches its recorded digest and
+        # that every rule compiles. Deliberately offline: a build that reached out
+        # to GitHub for rules could change what gets flagged without a commit.
+        run: python3 scripts/fetch-rules.py --check
+
+      - name: Lint the shell we ship
+        run: |
+          shellcheck --version
+          shellcheck -S warning install.sh packaging/build-deb.sh
+          # Maintainer scripts are /bin/sh; tell shellcheck so it flags bashisms.
+          shellcheck -S warning -s sh packaging/deb/DEBIAN/postinst \
+            packaging/deb/DEBIAN/prerm packaging/deb/DEBIAN/postrm
+
+  # ---------------------------------------------------------------------------
+  # Builds the .deb and then actually installs it, which is the only way to
+  # prove the declared Depends resolve on a clean machine — the thing most
+  # likely to be wrong and least likely to be noticed locally.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the package
+        id: build
+        run: |
+          ./packaging/build-deb.sh
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' safepaste/__init__.py)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "deb=dist/safepaste_${version}_all.deb" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect the package
+        run: |
+          deb=dist/safepaste_${{ steps.build.outputs.version }}_all.deb
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+
+      - name: Lintian
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lintian
+          # Informational: a few tags (no man page, no changelog) are expected for
+          # a package that is not headed for the Debian archive.
+          lintian --no-tag-display-limit \
+            dist/safepaste_${{ steps.build.outputs.version }}_all.deb || true
+
+      - name: Install it, resolving real dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ./dist/safepaste_${{ steps.build.outputs.version }}_all.deb
+          dpkg -s safepaste | head -20
+
+      - name: Smoke-test the installed package
+        run: |
+          set -eux
+          # Detection works from the installed location, using the packaged rules.
+          safepaste rules --stats
+          # A planted secret must be found (exit 1) ...
+          printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
+            | safepaste scan - && { echo "expected a finding"; exit 1; } || true
+          # ... redacted value-only, surrounding text intact ...
+          out=$(printf 'keep\nGITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\nkeep\n' \
+            | safepaste redact - 2>/dev/null)
+          test "$out" = "$(printf 'keep\nGITHUB_TOKEN=[REDACTED]\nkeep')"
+          # ... and clean text exits 0.
+          printf 'nothing sensitive here\n' | safepaste scan -
+          test "$(printf 'hunter2' | safepaste hash)" \
+             = "f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c7"
+
+      - name: Every module imports from the installed package
+        run: |
+          # No display on a runner, which is fine: importing gi/GTK4 needs no
+          # display, only widget construction does. This catches a missing
+          # dependency or typelib that the CLI smoke test would not reach.
+          python3 - <<'PY'
+          import importlib
+          mods = [
+              "safepaste", "safepaste.cli", "safepaste.app", "safepaste.daemon",
+              "safepaste.hotkey", "safepaste.inject", "safepaste.session",
+              "safepaste.detector", "safepaste.redactor", "safepaste.config",
+              "safepaste.clipboard.monitor", "safepaste.clipboard.writer",
+              "safepaste.ui.dialog", "safepaste.ui.prefs", "safepaste.ui.tray",
+          ]
+          for m in mods:
+              importlib.import_module(m)
+          print(f"{len(mods)}/{len(mods)} modules imported")
+          PY
+
+      - name: Verify the systemd user unit
+        run: |
+          systemd-analyze --user verify /usr/lib/systemd/user/safepaste.service
+          desktop-file-validate /usr/share/applications/safepaste.desktop
+
+      - name: Confirm it uninstalls cleanly
+        run: |
+          sudo apt-get remove -y safepaste
+          # User settings must survive removal; the package must never delete them.
+          ! test -e /usr/lib/python3/dist-packages/safepaste
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: safepaste_${{ steps.build.outputs.version }}_all.deb
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # Tag-driven release. Push a tag and the .deb is attached to it:
+  #     git tag v0.1.0 && git push origin v0.1.0
+  # ---------------------------------------------------------------------------
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: safepaste_${{ needs.build.outputs.version }}_all.deb
+          path: dist
+
+      - name: Warn if the tag and __version__ disagree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="${{ needs.build.outputs.version }}"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::warning::tag $GITHUB_REF_NAME does not match __version__ $pkg"
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Notes go via a file rather than a heredoc: gh accepts only one of
+          # --notes/--notes-file/--generate-notes, and a heredoc nested in a YAML
+          # block scalar is easy to break with a stray indent.
+          {
+            echo 'Install:'
+            echo
+            echo '    sudo apt install ./safepaste_*_all.deb'
+            echo
+            echo 'Then, in your own session (not root):'
+            echo
+            echo '    systemctl --user start safepaste.service'
+            echo '    python3 -m safepaste.hotkey install    # binds Ctrl+Alt+V'
+            echo
+            echo 'Built and tested on Ubuntu 24.04 / GNOME 46 / Wayland. See the'
+            echo 'README for how clipboard monitoring works there, and for the'
+            echo 'known limitations.'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/*.deb \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "SafePaste $GITHUB_REF_NAME" \
+            --notes-file notes.md

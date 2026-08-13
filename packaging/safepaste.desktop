@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SafePaste
+Comment=Guard the clipboard against pasted secrets
+Exec=safepaste-gui
+Icon=security-high-symbolic
+Terminal=false
+Categories=Utility;Security;GNOME;GTK;
+Keywords=clipboard;secret;security;password;credential;privacy;
+
+# safepaste-gui (safepaste/app.py) is a background application with no
+# primary window: on first launch it starts the clipboard daemon and an
+# optional tray icon, then opens Preferences; launching it again while it
+# is already running (e.g. from this entry, or via the systemd user unit
+# already having started it at login) re-activates the same instance and
+# simply raises Preferences instead of starting a second copy -- ordinary
+# GApplication/D-Bus-activation single-instance behaviour keyed on the
+# dev.safepaste.SafePaste application ID.

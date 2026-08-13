@@ -1,0 +1,45 @@
+#!/bin/sh
+# postrm for safepaste
+set -e
+
+case "$1" in
+    purge)
+        # Belt-and-braces: prerm already disabled the unit on `remove`, but
+        # postrm purge can also run standalone (e.g. `dpkg --purge` after
+        # files were already removed some other way), so repeat it here.
+        # Idempotent either way.
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl --global disable safepaste.service >/dev/null 2>&1 || true
+        fi
+
+        cat <<'EOF'
+
+SafePaste purged.
+
+Per-user data under ~/.config/safepaste/ -- each user's config.toml, any
+custom rules/*.toml, and the exclusion list of SHA-256 digests -- has
+been left in place for every user on this system.
+
+This script runs as root and only ever touches package-owned files under
+/usr, /etc and similar system locations. ~/.config/safepaste/ is the one
+place each user's own settings and exclusions live, so deleting it here
+would be destroying their data, not cleaning up a package -- this script
+never does that.
+
+If you want it gone, remove it yourself, per user:
+
+    rm -rf ~/.config/safepaste
+
+EOF
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

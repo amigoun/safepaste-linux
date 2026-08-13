@@ -1,0 +1,49 @@
+#!/bin/sh
+# postinst for safepaste
+set -e
+
+case "$1" in
+    configure)
+        # --global enables the user unit for every current and future user
+        # (it drops a symlink under /etc/systemd/user/graphical-session.target.wants/,
+        # picked up at each user's next login) -- idempotent, safe to repeat
+        # on every upgrade.
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl --global enable safepaste.service >/dev/null 2>&1 || true
+        fi
+
+        # Deliberately NOT starting the service for any currently-installing
+        # or currently-logged-in user here: this script runs as root, quite
+        # possibly with no session at all, and even when a session does
+        # exist, root has no route to that user's D-Bus session bus or
+        # Wayland display. There is nothing for `systemctl --user` to reach
+        # from inside a maintainer script.
+        cat <<'EOF'
+
+SafePaste installed.
+
+The clipboard guard runs as a per-user systemd unit (safepaste.service)
+and has been enabled for every user's next login.
+
+To start protecting the clipboard right now in an already-open session,
+either log out and back in, or run this as yourself (not root):
+
+    systemctl --user start safepaste.service
+
+To bind Ctrl+Alt+V for on-demand sanitising, run this as yourself:
+
+    python3 -m safepaste.hotkey install
+
+EOF
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
