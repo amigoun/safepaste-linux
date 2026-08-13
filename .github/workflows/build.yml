@@ -50,6 +50,67 @@ jobs:
             packaging/deb/DEBIAN/prerm packaging/deb/DEBIAN/postrm
 
   # ---------------------------------------------------------------------------
+  # The macOS backend, on a real Mac.
+  #
+  # This job exists because the darwin unit tests drive a *fake* NSPasteboard, so
+  # they establish that the logic is right and say nothing about whether the
+  # PyObjC calls are. Everything else about this project has been verified on real
+  # hardware; without this job, the macOS backend would be the one part that never
+  # had been.
+  #
+  # A runner has no interactive GUI session, so the tray and hotkey are out of
+  # reach — but NSPasteboard is not focus-gated the way Wayland's clipboard is, so
+  # read, write, monitoring and a full redaction round-trip are all testable.
+  # ---------------------------------------------------------------------------
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --break-system-packages \
+            regex pyobjc-framework-Cocoa pyobjc-framework-Quartz pytest
+
+      - name: The portable suite must pass identically here
+        # Same code, same assertions, different OS. If this diverges from the
+        # Linux run, something in the "portable" core is not portable.
+        run: python3 -m pytest -q
+
+      - name: Backend self-check against the real pasteboard
+        run: python3 -m safepaste.backend.darwin
+
+      - name: End-to-end against the real pasteboard
+        # Exits 77 if it is not actually running on macOS, which would mean this
+        # job silently verified nothing — so treat that as a failure here.
+        run: |
+          set +e
+          python3 scripts/verify-darwin.py
+          status=$?
+          set -e
+          if [ "$status" = "77" ]; then
+            echo "::error::verify-darwin.py reported it was not on macOS"
+            exit 1
+          fi
+          exit "$status"
+
+      - name: The CLI works with no desktop at all
+        run: |
+          set -eux
+          python3 -m safepaste rules --stats
+          printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
+            | python3 -m safepaste redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=\[REDACTED\]'
+          # The service dispatcher must pick the polling shell, not the GLib daemon.
+          python3 -c "
+          import sys
+          assert sys.platform == 'darwin', sys.platform
+          from safepaste.backend import get_backend
+          assert get_backend().name == 'darwin'
+          from safepaste.shell import PollingShell
+          print('darwin backend and polling shell both resolve')
+          "
+
+  # ---------------------------------------------------------------------------
   # Builds the .deb and then actually installs it, which is the only way to
   # prove the declared Depends resolve on a clean machine — the thing most
   # likely to be wrong and least likely to be noticed locally.
