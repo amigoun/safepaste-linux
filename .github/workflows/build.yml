@@ -174,6 +174,32 @@ jobs:
           test -x "$(brew --prefix)/bin/safepaste-daemon"
           brew uninstall local/safepaste/safepaste
 
+      - name: The documented install command, verbatim
+        # Everything above installs from a scratch tap built by `brew tap-new`, which
+        # tests the formula and not the route a user takes. This runs the two lines
+        # the README prints, against the real repository -- which is the only way to
+        # catch the class of mistake where the formula is perfect and unreachable.
+        # It found one already: `brew tap` reads Formula/, and this file used to live
+        # under packaging/, so the tap succeeded and the install said no such
+        # formula.
+        #
+        # Note this installs the *released* version the formula points at, not the
+        # commit under test, and that is deliberate: it answers "can someone install
+        # SafePaste right now", which is a different question from "does this branch
+        # build".
+        if: github.event_name == 'push'
+        run: |
+          set -eux
+          brew tap amigoun/safepaste https://github.com/amigoun/safepaste-linux
+          brew install amigoun/safepaste/safepaste
+          brew test amigoun/safepaste/safepaste
+          installed=$(brew list --versions amigoun/safepaste/safepaste)
+          echo "::notice::installed via the documented path: $installed"
+          # Not started here: launchd would run it against a runner with no GUI
+          # session. That the service block is well-formed is brew audit's job.
+          brew uninstall amigoun/safepaste/safepaste
+          brew untap amigoun/safepaste
+
       - name: The CLI works with no desktop at all
         run: |
           set -eux
