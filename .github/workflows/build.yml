@@ -369,7 +369,9 @@ jobs:
   #     git tag v0.1.0 && git push origin v0.1.0
   # ---------------------------------------------------------------------------
   release:
-    needs: build
+    # Also needs windows/, because the portable archive is a release asset and its
+    # sha256 goes into the Scoop manifest.
+    needs: [build, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
@@ -381,6 +383,56 @@ jobs:
         with:
           name: safepaste_${{ needs.build.outputs.version }}_all.deb
           path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: safepaste-win64
+          path: dist
+
+      - name: Generate package-manager manifests with real hashes
+        # The committed manifest and formula are templates; these are the
+        # authoritative copies, because only here do the artifacts exist to hash.
+        # A wrong hash fails the install at the download step saying nothing useful,
+        # so neither is ever written by hand.
+        run: |
+          set -eux
+          version="${GITHUB_REF_NAME#v}"
+          zip="dist/safepaste-${version}-win64.zip"
+          test -f "$zip"
+          zip_sha=$(sha256sum "$zip" | cut -d" " -f1)
+
+          # GitHub generates the source tarball for a tag; the formula builds from it.
+          tarball="https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$GITHUB_REF_NAME.tar.gz"
+          curl -sSL -o /tmp/src.tar.gz "$tarball"
+          src_sha=$(sha256sum /tmp/src.tar.gz | cut -d" " -f1)
+
+          python3 - "$version" "$zip_sha" "$src_sha" <<'PYEOF'
+          import json, pathlib, re, sys
+
+          version, zip_sha, src_sha = sys.argv[1:4]
+
+          manifest = json.loads(pathlib.Path("packaging/scoop/safepaste.json").read_text())
+          manifest["version"] = version
+          arch = manifest["architecture"]["64bit"]
+          arch["url"] = re.sub(r"/v[^/]+/", f"/v{version}/", arch["url"])
+          arch["url"] = re.sub(r"safepaste-[^/]+-win64\.zip", f"safepaste-{version}-win64.zip", arch["url"])
+          arch["hash"] = zip_sha
+          arch["extract_dir"] = f"safepaste-{version}-win64"
+          pathlib.Path("dist/safepaste.json").write_text(json.dumps(manifest, indent=4) + "\n")
+
+          formula = pathlib.Path("packaging/homebrew/safepaste.rb").read_text()
+          formula = re.sub(
+              r'(url "https://github\.com/[^"]*/archive/refs/tags/)v[^"]*(\.tar\.gz")',
+              rf"\g<1>v{version}\g<2>", formula, count=1,
+          )
+          # Only the first sha256 belongs to the tarball; the rest are resources.
+          formula = re.sub(r'(\n  sha256 ")[0-9a-fA-F]{64}(")', rf"\g<1>{src_sha}\g<2>", formula, count=1)
+          pathlib.Path("dist/safepaste.rb").write_text(formula)
+          print(f"scoop hash   {zip_sha}")
+          print(f"formula hash {src_sha}")
+          PYEOF
+          grep -m1 sha256 dist/safepaste.rb
+          python3 -c "import json;d=json.load(open('dist/safepaste.json'));print(d['version'], d['architecture']['64bit']['hash'])"
 
       - name: Warn if the tag and __version__ disagree
         run: |
@@ -398,20 +450,37 @@ jobs:
           # --notes/--notes-file/--generate-notes, and a heredoc nested in a YAML
           # block scalar is easy to break with a stray indent.
           {
-            echo 'Install:'
+            echo '## Linux (Debian/Ubuntu)'
             echo
             echo '    sudo apt install ./safepaste_*_all.deb'
-            echo
-            echo 'Then, in your own session (not root):'
-            echo
             echo '    systemctl --user start safepaste.service'
             echo '    python3 -m safepaste.hotkey install    # binds Ctrl+Alt+V'
             echo
-            echo 'Built and tested on Ubuntu 24.04 / GNOME 46 / Wayland. See the'
-            echo 'README for how clipboard monitoring works there, and for the'
-            echo 'known limitations.'
+            echo '## macOS'
+            echo
+            echo '    brew tap amigoun/safepaste https://github.com/amigoun/safepaste-linux'
+            echo '    brew install safepaste'
+            echo '    brew services start safepaste'
+            echo
+            echo 'Builds from source, so no notarised binary and no Apple'
+            echo 'Developer subscription is involved.'
+            echo
+            echo '## Windows'
+            echo
+            echo '    scoop install https://github.com/amigoun/safepaste-linux/releases/download/'"$GITHUB_REF_NAME"'/safepaste.json'
+            echo
+            echo 'Or download safepaste-*-win64.zip and run safepaste-daemon.exe.'
+            echo 'The executables are unsigned, so SmartScreen may warn on first run.'
+            echo
+            echo '## Verification'
+            echo
+            echo 'Linux is checked live on a real desktop; macOS and Windows against'
+            echo 'their real clipboard APIs on CI runners. See the README for what'
+            echo 'each platform can and cannot do -- notably that per-application'
+            echo 'policy works on macOS and Windows but not on GNOME.'
           } > notes.md
-          gh release create "$GITHUB_REF_NAME" dist/*.deb \
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.deb dist/*.zip dist/safepaste.json dist/safepaste.rb \
             --repo "$GITHUB_REPOSITORY" \
             --title "SafePaste $GITHUB_REF_NAME" \
             --notes-file notes.md

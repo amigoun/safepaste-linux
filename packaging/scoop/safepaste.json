@@ -1,4 +1,5 @@
 {
+    "##": "Template. The authoritative manifest for a given release is attached to that release as safepaste.json, with the real archive hash; this copy carries a placeholder because the archive does not exist until the release is built.",
     "version": "0.3.0",
     "description": "Clipboard secret-guard. Detects credentials the moment they are copied and redacts them before they can be pasted.",
     "homepage": "https://github.com/amigoun/safepaste-linux",
