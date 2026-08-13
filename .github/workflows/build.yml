@@ -127,9 +127,14 @@ jobs:
           print(f"{len(mods)}/{len(mods)} modules imported")
           PY
 
-      - name: Verify the systemd user unit
+      - name: Verify the systemd user unit and desktop entry
         run: |
+          # systemd is present on the runner; desktop-file-utils is not.
+          sudo apt-get install -y --no-install-recommends desktop-file-utils
+          # --user matters: this is a user unit, and verifying it as a system unit
+          # reports spurious errors about %h and graphical-session.target.
           systemd-analyze --user verify /usr/lib/systemd/user/safepaste.service
+          # Exits non-zero on real errors; "hint" lines alone are a pass.
           desktop-file-validate /usr/share/applications/safepaste.desktop
 
       - name: Confirm it uninstalls cleanly
