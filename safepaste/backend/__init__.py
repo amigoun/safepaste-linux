@@ -244,6 +244,22 @@ class Backend:
     def tray(self, **callbacks: Callable) -> Tray | None:
         return None
 
+    def foreground_app(self) -> str | None:
+        """Identity of the application that would receive a paste, or None.
+
+        The identity is whatever that platform can state cheaply and stably:
+        an executable name on Windows ("chrome.exe"), a bundle identifier on macOS
+        ("com.google.Chrome"). Compared case-insensitively, since neither platform
+        is consistent about case.
+
+        None means "cannot tell", which is the permanent answer on GNOME:
+        org.gnome.Shell.Introspect refuses GetWindows to unsandboxed callers, and
+        there is no other public API. Per-application policy therefore cannot work
+        there without a Shell extension, and callers must treat None as "apply the
+        global mode" rather than as an error.
+        """
+        return None
+
     def pump(self) -> bool:
         """Service any platform event queue. False means the platform asked us to stop.
 

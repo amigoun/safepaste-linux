@@ -469,6 +469,29 @@ class DarwinBackend(Backend):
 
         return Tray(loop, **callbacks)
 
+    def foreground_app(self) -> str | None:
+        """The frontmost application's bundle identifier.
+
+        Needs no permission, unlike almost everything else in this area -- and it is
+        precisely what org.gnome.Shell.Introspect refuses to tell us on GNOME.
+        """
+        try:
+            from AppKit import NSWorkspace
+
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            if app is None:
+                return None
+            identity = app.bundleIdentifier()
+            if identity:
+                return str(identity).lower()
+            # A process with no bundle (a bare binary): fall back to its name, which
+            # is still a stable enough thing to write a policy against.
+            name = app.localizedName()
+            return str(name).lower() if name else None
+        except Exception as exc:  # noqa: BLE001
+            log.debug("cannot identify the frontmost application: %s", exc)
+            return None
+
     def pump(self) -> bool:
         loop = getattr(self, "_loop", None)
         if not loop:

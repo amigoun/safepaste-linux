@@ -622,6 +622,66 @@ class WindowsBackend(Backend):
 
         return Tray(window, **callbacks)
 
+    def foreground_app(self) -> str | None:
+        """The executable name of the foreground window's process.
+
+        PROCESS_QUERY_LIMITED_INFORMATION rather than PROCESS_QUERY_INFORMATION on
+        purpose: it is the least privilege that can answer this, and it works
+        against elevated processes where the broader right is refused.
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            user32.GetWindowThreadProcessId.argtypes = [
+                wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+            ]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            kernel32.OpenProcess.argtypes = [
+                wintypes.DWORD, wintypes.BOOL, wintypes.DWORD
+            ]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.QueryFullProcessImageNameW.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return None
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if not pid.value:
+                return None
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
+            )
+            if not handle:
+                log.debug("cannot open pid %d to name it", pid.value)
+                return None
+            try:
+                size = wintypes.DWORD(1024)
+                buffer = ctypes.create_unicode_buffer(size.value)
+                if not kernel32.QueryFullProcessImageNameW(
+                    handle, 0, buffer, ctypes.byref(size)
+                ):
+                    return None
+                import ntpath
+
+                return ntpath.basename(buffer.value).lower() or None
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("cannot identify the foreground application: %s", exc)
+            return None
+
     def pump(self) -> bool:
         """Drain the message queue, if a window was ever created.
 

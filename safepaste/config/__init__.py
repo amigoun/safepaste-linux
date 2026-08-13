@@ -101,6 +101,17 @@ class Config:
 
     extra_rule_globs: tuple[str, ...] = ("rules/*.toml",)
 
+    # --- per-application policy -------------------------------------------
+    # Application identity -> mode, overriding `mode` when the paste target is
+    # known. Stored as pairs rather than a dict so the dataclass stays hashable-ish
+    # and the TOML emitter has one less shape to handle; `app_mode()` does lookups.
+    #
+    # Identity is an executable name on Windows ("1password.exe") and a bundle
+    # identifier on macOS ("com.agilebits.onepassword7"). Empty on Linux, and it can
+    # only ever be empty there: org.gnome.Shell.Introspect refuses to name the
+    # focused window, so there is nothing to key a policy on.
+    app_modes: tuple[tuple[str, str], ...] = ()
+
     _warnings: list[str] = field(default_factory=list, repr=False, compare=False)
 
     # -- validation --------------------------------------------------------
@@ -131,6 +142,17 @@ class Config:
             self.max_scan_bytes = 1_048_576
         if self.keep_prefix < 0:
             self.keep_prefix = 0
+        valid_policy = []
+        for app, mode in self.app_modes:
+            if mode not in MODES:
+                self._warnings.append(
+                    f"ignoring policy for {app!r}: unknown mode {mode!r}"
+                )
+                continue
+            if not app.strip():
+                continue
+            valid_policy.append((app, mode))
+        self.app_modes = tuple(valid_policy)
         return self
 
     @property
@@ -140,6 +162,21 @@ class Config:
     @property
     def excluded_hash_set(self) -> frozenset[str]:
         return frozenset(self.excluded_hashes)
+
+    def app_mode(self, identity: str | None) -> str:
+        """The mode to apply for a given paste target.
+
+        Falls back to the global mode when the identity is unknown or has no rule,
+        which is what makes this safe to consult unconditionally: on a platform that
+        cannot identify the target, every lookup simply returns the global mode.
+        """
+        if not identity:
+            return self.mode
+        wanted = identity.lower()
+        for app, mode in self.app_modes:
+            if app.lower() == wanted:
+                return mode
+        return self.mode
 
     def extra_rule_paths(self) -> list[pathlib.Path]:
         found: list[pathlib.Path] = []
@@ -159,6 +196,10 @@ _SECTIONS = {
     "exclusions": ("excluded_hashes",),
     "input": ("safe_paste_hotkey", "auto_paste", "portal_restore_token"),
 }
+
+# Not in _SECTIONS: its keys are application identities chosen by the user, not a
+# fixed set, so it is read and written by hand below.
+POLICY_SECTION = "policy"
 
 
 def load(path: pathlib.Path | None = None) -> Config:
@@ -186,6 +227,12 @@ def load(path: pathlib.Path | None = None) -> Config:
             # Tuple-typed fields arrive as TOML arrays.
             values[key] = tuple(value) if isinstance(value, list) else value
 
+    policy = doc.get(POLICY_SECTION) or {}
+    if isinstance(policy, dict):
+        values["app_modes"] = tuple(
+            (str(app), str(mode)) for app, mode in policy.items()
+        )
+
     return Config(**values).validated()  # type: ignore[arg-type]
 
 
@@ -211,6 +258,16 @@ def save(cfg: Config, path: pathlib.Path | None = None) -> None:
         lines.append(f"[{section}]")
         for key in keys:
             lines.append(f"{key} = {_emit(getattr(cfg, key))}")
+        lines.append("")
+
+    if cfg.app_modes:
+        lines.append(f"[{POLICY_SECTION}]")
+        lines.append("# Application identity -> mode, overriding [protection].mode")
+        lines.append("# when the paste target is known. Executable name on Windows,")
+        lines.append("# bundle identifier on macOS. Unusable on Linux: the desktop")
+        lines.append("# will not say which window has focus.")
+        for app, mode in cfg.app_modes:
+            lines.append(f"{_emit(app)} = {_emit(mode)}")
         lines.append("")
 
     tmp = path.with_suffix(".toml.tmp")

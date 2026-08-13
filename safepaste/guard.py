@@ -216,10 +216,32 @@ class Guard:
         if self.on_detection is not None:
             self.on_detection(findings, result, event)
 
+    def target_mode(self) -> tuple[str, str | None]:
+        """The mode to apply to a paste happening now, and the target's identity.
+
+        Only meaningful where the platform can name the foreground application. On
+        GNOME it never can, so this always returns the global mode -- which is why
+        callers can use it unconditionally.
+        """
+        identity = self.backend.foreground_app()
+        return self.config.app_mode(identity), identity
+
     def safe_paste(self) -> int:
-        """Sanitise whatever is on the clipboard right now, on demand."""
+        """Sanitise whatever is on the clipboard right now, on demand.
+
+        This is the one path that already knows where the paste is going, so
+        per-application policy applies here even without keyboard interception:
+        pressing the shortcut inside a password manager can legitimately do nothing.
+        """
         if self.locks is not None and self.locks.refresh():
             log.info("safe paste ignored: session is locked")
+            return 0
+
+        mode, identity = self.target_mode()
+        if mode == "off":
+            log.info(
+                "safe paste ignored: policy for %s is 'off'", identity or "this target"
+            )
             return 0
         event = self.monitor.reader.read_text()
         if event is None:

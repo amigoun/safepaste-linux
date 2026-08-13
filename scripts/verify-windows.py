@@ -259,6 +259,20 @@ def main() -> int:
                 check("state changes survive a real icon", True)
                 tray.stop()
 
+        # --- who would receive a paste? ---------------------------------------
+        # The capability that makes per-application policy possible here and
+        # impossible on GNOME, where Shell.Introspect refuses to answer.
+        identity = backend.foreground_app()
+        check(
+            "foreground_app returns a string or None, never raises",
+            identity is None or isinstance(identity, str),
+            f"identity={identity!r} (an executable name; None is acceptable on a runner "
+            "with no focused window)",
+        )
+        if identity:
+            check("the identity is lowercased for stable matching",
+                  identity == identity.lower(), identity)
+
         # --- injection ------------------------------------------------------
         # SendInput needs no permission, so this should genuinely succeed. It types
         # into whatever has focus, which on a CI runner is nothing.
