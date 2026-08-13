@@ -52,7 +52,7 @@ Other modes are available from Preferences: `ask` (leave the original, ask first
 
 ```sh
 ./packaging/build-deb.sh
-sudo apt install ./dist/safepaste_0.1.1_all.deb
+sudo apt install ./dist/safepaste_0.2.0_all.deb
 ```
 
 The package enables a **systemd user unit**, so protection starts at your next
