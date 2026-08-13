@@ -228,6 +228,14 @@ Two things surprise people:
   module is a hard dependency rather than a convenience. It also supplies the
   per-call `timeout=` that bounds RE2-shaped patterns running on a backtracking
   engine.
+- **Even `regex` needs a nudge, and the failure is silent.** RE2's `\z`
+  (end of text) is spelled `\Z` in Python, and Ubuntu 24.04's
+  `python3-regex 0.1.20221031` rejects `\z` outright, while a pip-installed
+  modern `regex` accepts it. Four upstream rules use it. `translate_re2()`
+  rewrites the anchor at load time; without it the installed package quietly ran
+  four detectors short on the distro it targets, with nothing but a log line to
+  say so. `RuleSet.compile_failures` and a test now make that condition loud —
+  worth knowing if you ever bump the pinned tag and a new RE2-ism appears.
 
 ### Custom rules
 
@@ -246,7 +254,7 @@ editing the vendored copy. Two SafePaste-only keys are honoured:
 ```sh
 python3 -m venv --system-site-packages .venv   # for the distro's PyGObject/GTK4
 .venv/bin/pip install regex python-xlib pytest
-.venv/bin/python -m pytest -q                  # 83 tests
+.venv/bin/python -m pytest -q                  # 86 tests
 ```
 
 `--system-site-packages` is required: GTK4 and libadwaita come from the distro's
