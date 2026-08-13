@@ -547,3 +547,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("safepaste: interrupted", file=sys.stderr)
         return 130
+
+
+# `python -m safepaste.cli` is what you reach for when the installed entry point
+# is the thing under suspicion. Without this it imported the module, ran nothing
+# and exited 0, which looks exactly like "the detector found no rules".
+if __name__ == "__main__":
+    raise SystemExit(main())

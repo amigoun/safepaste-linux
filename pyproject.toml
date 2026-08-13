@@ -1,3 +1,76 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safepaste"
+dynamic = ["version"]
+description = "Clipboard secret-guard: redacts credentials before they can be pasted"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [{ name = "alexei.migoun", email = "alexei.migoun@ox.security" }]
+keywords = ["clipboard", "secrets", "security", "gitleaks", "redaction"]
+classifiers = [
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+# Markers rather than extras, because the wrong platform's backend is never
+# importable anyway and a user should not have to know which name to ask for.
+#
+# `regex` is not optional: the detector runs 231 patterns written for Go's RE2,
+# and only `regex` offers the per-call timeout that keeps a pathological input
+# from hanging the daemon. The stdlib `re` has no such guard.
+#
+# PyGObject is deliberately absent. It builds from source against system
+# girepository headers, so listing it here turns `pip install safepaste` on a
+# bare Linux box into a compiler error. Ubuntu users get python3-gi from apt
+# (the .deb depends on it); everyone else can ask for the `gui` extra knowing
+# what it needs. Without it the CLI and the guard still work -- only the tray
+# and the dialogs go missing.
+dependencies = [
+    "regex>=2023.0.0",
+    "python-xlib>=0.33; sys_platform == 'linux'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+gui = ["PyGObject>=3.48"]
+
+[project.urls]
+Homepage = "https://github.com/amigoun/safepaste-linux"
+Issues = "https://github.com/amigoun/safepaste-linux/issues"
+
+[project.scripts]
+safepaste = "safepaste.cli:main"
+safepaste-daemon = "safepaste.service:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "safepaste.__version__" }
+
+# Explicit, because setuptools' auto-discovery refuses to guess: a flat layout
+# with safepaste/, tests/, scripts/ and packaging/ all at the top level is
+# ambiguous to it, and it fails the build rather than choosing. That failure only
+# ever appeared in the Homebrew job, which is the one path that installs with pip
+# -- the .deb copies the tree and writes its own shims.
+[tool.setuptools.packages.find]
+include = ["safepaste*"]
+namespaces = false
+
+# The rule data is the product. A wheel without it installs cleanly, starts,
+# exits zero and finds nothing -- the worst failure available to a secret
+# scanner -- so it is listed here and asserted after install in CI.
+[tool.setuptools.package-data]
+"safepaste.detector" = ["data/*.toml", "data/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

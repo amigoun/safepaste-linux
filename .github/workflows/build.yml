@@ -51,6 +51,40 @@ jobs:
         # to GitHub for rules could change what gets flagged without a commit.
         run: python3 scripts/fetch-rules.py --check
 
+      - name: Install with pip, the way Homebrew does
+        # This exists because the Homebrew job was the *only* thing installing this
+        # project with pip, and it found out the hard way that pyproject.toml
+        # carried nothing but pytest config: setuptools refuses to guess packages
+        # from a flat layout with safepaste/, tests/, scripts/ and packaging/ side
+        # by side, so the formula failed at "Getting requirements to build wheel".
+        # Five minutes into a macOS job is an expensive place to learn that. Here it
+        # takes forty seconds.
+        run: |
+          set -eux
+          python3 -m venv /tmp/pipvenv
+          /tmp/pipvenv/bin/pip install --quiet .
+
+          # The rule data is the product, and a wheel without it installs cleanly,
+          # runs and finds nothing. Assert the count, not just that the binary runs.
+          /tmp/pipvenv/bin/safepaste rules --stats | grep -qE '^total rules: [0-9]{3}$'
+          printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
+            | /tmp/pipvenv/bin/safepaste redact - 2>/dev/null \
+            | grep -qF 'GITHUB_TOKEN=[REDACTED]'
+          test -x /tmp/pipvenv/bin/safepaste-daemon
+
+          # PyGObject is not a declared dependency on purpose (it builds against
+          # system headers), so this venv has no `gi` -- which makes it the right
+          # place to check that the daemon says what to install rather than dumping
+          # a ModuleNotFoundError traceback. Exit 3 is that path.
+          set +e
+          out=$(/tmp/pipvenv/bin/safepaste-daemon 2>&1); status=$?
+          set -e
+          test "$status" = "3"
+          printf '%s\n' "$out" | grep -q 'sudo apt install python3-gi'
+          # `grep -qv Traceback` would pass on any multi-line output, since -v is
+          # per-line. Negate the whole match instead.
+          ! printf '%s\n' "$out" | grep -q 'Traceback'
+
       - name: Lint the shell we ship
         run: |
           shellcheck --version
@@ -128,8 +162,9 @@ jobs:
       - name: Install from the formula and run its test block
         run: |
           set -eux
-          # --HEAD, because the tagged tarball's sha256 is a placeholder until a
-          # release fills it in, and this is a branch build.
+          # --HEAD builds the commit under test rather than the last tag, which is
+          # the point: a formula that installs v0.3.0 successfully says nothing
+          # about whether this branch still installs.
           brew install --HEAD --build-from-source local/safepaste/safepaste
           brew test local/safepaste/safepaste
           # Independently of brew's own test block, from the installed prefix:

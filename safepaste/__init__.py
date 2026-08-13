@@ -1,3 +1,3 @@
-"""SafePaste — a local secret guard for the Linux clipboard."""
+"""SafePaste — a local secret guard for the clipboard, on Linux, macOS and Windows."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
