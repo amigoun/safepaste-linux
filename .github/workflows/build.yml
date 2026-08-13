@@ -324,12 +324,17 @@ jobs:
           # By full path: the installer edits the user PATH, which this session has
           # already read.
           $shim = "$env:USERPROFILE\scoop\shims\safepaste.exe"
-          $stats = & $shim rules --stats
-          $stats | Select-Object -First 1
+
+          # Out-String, because PowerShell captures multi-line output as a string
+          # array, and `-notmatch` over an array returns the elements that did not
+          # match rather than a boolean. A non-empty array is truthy, so the check
+          # fired on output it had in fact matched.
+          $stats = (& $shim rules --stats) | Out-String
+          $stats.Split("`n")[0]
           if ($stats -notmatch 'total rules: \d\d\d') {
             throw "the installed build has no rules: $stats"
           }
-          $out = "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z" | & $shim redact -
+          $out = ("GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z" | & $shim redact -) | Out-String
           if ($out -notmatch [regex]::Escape("GITHUB_TOKEN=[REDACTED]")) {
             throw "the installed build did not redact: $out"
           }
