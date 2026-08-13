@@ -242,6 +242,11 @@ def get_backend(name: str | None = None) -> Backend:
 
         return DarwinBackend()
 
+    if chosen in ("win32", "cygwin"):
+        from .windows import WindowsBackend
+
+        return WindowsBackend()
+
     raise NotImplementedError(
         f"no SafePaste backend for platform {chosen!r}; "
         "see safepaste/backend/__init__.py for the contract a new one must satisfy"

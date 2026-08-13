@@ -35,13 +35,20 @@ def _config_root() -> pathlib.Path:
         return pathlib.Path(override)
     if sys.platform == "darwin":
         return pathlib.Path.home() / "Library"
+    if sys.platform == "win32":
+        # Roaming, not Local: settings are small and worth following the user.
+        return pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home()))
     return pathlib.Path.home() / ".config"
 
 
 def _config_dir() -> pathlib.Path:
     root = _config_root()
-    if sys.platform == "darwin" and not os.environ.get("XDG_CONFIG_HOME"):
+    if os.environ.get("XDG_CONFIG_HOME"):
+        return root / "safepaste"
+    if sys.platform == "darwin":
         return root / "Application Support" / "SafePaste"
+    if sys.platform == "win32":
+        return root / "SafePaste"
     return root / "safepaste"
 
 

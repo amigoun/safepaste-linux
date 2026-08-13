@@ -28,7 +28,9 @@ def main(argv: list[str] | None = None) -> int:
 
         return daemon_main(args)
 
-    if sys.platform == "darwin":
+    if sys.platform in ("darwin", "win32", "cygwin"):
+        # Both backends detect changes by comparing an integer, so the plain
+        # polling loop drives them; neither needs a run loop until it grows a tray.
         from .shell import main as shell_main
 
         return shell_main(args)
