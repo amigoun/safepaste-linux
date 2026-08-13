@@ -299,10 +299,15 @@ stubs that pretend.
 | **Rich formatting preserved** | ✗ `wl-copy` is one MIME type per call | ✓ multi-representation writes | ✗ plain formats only; `CF_HTML` carries byte offsets that a redaction invalidates |
 | Notifications | ✓ GNOME notifications | ✓ `osascript` | logs only — a balloon needs the tray window, which now exists |
 | Tray icon | ✓ hand-rolled StatusNotifierItem | ✓ `NSStatusItem` | ✓ `Shell_NotifyIcon` |
-| Global hotkey | ✓ `Ctrl+Alt+V` via gsettings | ✓ `Cmd+Alt+V` via Carbon | ✓ `Ctrl+Alt+V` via `RegisterHotKey` |
+| Global hotkey | ✓ `Ctrl+Alt+V` via gsettings | ✓ via Carbon `RegisterEventHotKey` | ✓ via `RegisterHotKey` |
 | Keystroke injection | RemoteDesktop portal (consent once) | `CGEventPost` (needs Accessibility) | `SendInput` |
 | Real paste interception | impossible on Wayland | possible via `CGEventTap`, not built | possible via `WH_KEYBOARD_LL`, not built |
 | **Per-app policy** | impossible without a Shell extension | ✓ bundle identifier | ✓ executable name |
+
+The shortcut is `Ctrl+Alt+V` everywhere, including macOS, because the accelerator in
+`config.toml` is spelled the same on every platform and `<Control>` means Control.
+Write it as `<Primary><Alt>v` to get Command on a Mac and Control elsewhere from one
+config file.
 
 Per-app policy applies to the on-demand shortcut, which is the only path that knows
 where the paste is going — pressing it inside a password manager can legitimately do
