@@ -27,7 +27,11 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-regex python3-pytest
+          # python3-gi alone is not enough: the tray tests need only Gio, but the
+          # dialog tests need the GTK4 and libadwaita typelibs. Without them those
+          # two skip, and the transient-parent fix would go uncovered here.
+          sudo apt-get install -y --no-install-recommends \
+            python3-regex python3-pytest python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
 
       - name: Run the test suite
         run: python3 -m pytest -q

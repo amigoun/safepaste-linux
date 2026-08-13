@@ -21,6 +21,31 @@ from safepaste.config import MODES  # noqa: E402
 from safepaste.ui.tray import TrayIndicator  # noqa: E402
 
 
+def _adwaita_available() -> bool:
+    """Whether the GTK4 and libadwaita *typelibs* are installed.
+
+    Distinct from `gi` being importable, which is all the module-level skip above
+    checks: the tray needs only Gio, which ships with python3-gi, while the dialog
+    needs gir1.2-gtk-4.0 and gir1.2-adw-1. Conflating the two made two dialog tests
+    fail on a lean CI runner rather than skip.
+    """
+    try:
+        import gi
+
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        from gi.repository import Adw  # noqa: F401
+    except (ImportError, ValueError):
+        return False
+    return True
+
+
+requires_adwaita = pytest.mark.skipif(
+    not _adwaita_available(),
+    reason="GTK4/libadwaita typelibs absent (gir1.2-gtk-4.0, gir1.2-adw-1)",
+)
+
+
 @pytest.fixture
 def tray() -> TrayIndicator:
     # Never started: no bus name is taken and nothing is registered.
@@ -224,6 +249,7 @@ def test_the_declared_interface_and_the_getters_agree(tray: TrayIndicator) -> No
 # ---------------------------------------------------------------------------
 
 
+@requires_adwaita
 def test_the_dialog_accepts_a_transient_parent() -> None:
     # require_version before importing Adw, or PyGI warns -- and the suite runs
     # with -W error, so a warning is a failure. safepaste.ui.dialog does this
@@ -247,6 +273,7 @@ def test_the_dialog_accepts_a_transient_parent() -> None:
     assert parent.get_visible() is False
 
 
+@requires_adwaita
 def test_the_dialog_still_works_without_one() -> None:
     """Degrading is required: a parentless dialog is discouraged, not broken."""
     import gi
