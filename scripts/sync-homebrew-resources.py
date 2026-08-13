@@ -20,7 +20,7 @@ import re
 import sys
 import urllib.request
 
-FORMULA = pathlib.Path(__file__).resolve().parent.parent / "packaging" / "homebrew" / "safepaste.rb"
+FORMULA = pathlib.Path(__file__).resolve().parent.parent / "Formula" / "safepaste.rb"
 
 
 def sdist(name: str) -> tuple[str, str, str]:

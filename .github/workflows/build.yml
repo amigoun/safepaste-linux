@@ -150,7 +150,7 @@ jobs:
           # Homebrew -- it takes a *name*. That is also closer to how someone would
           # actually install this, so it is the better test anyway.
           brew tap-new --no-git local/safepaste
-          cp packaging/homebrew/safepaste.rb \
+          cp Formula/safepaste.rb \
             "$(brew --repo local/safepaste)/Formula/safepaste.rb"
 
           # Strict is advisory: it flags house style for the core tap, which a
@@ -455,7 +455,7 @@ jobs:
           arch["extract_dir"] = f"safepaste-{version}-win64"
           pathlib.Path("dist/safepaste.json").write_text(json.dumps(manifest, indent=4) + "\n")
 
-          formula = pathlib.Path("packaging/homebrew/safepaste.rb").read_text()
+          formula = pathlib.Path("Formula/safepaste.rb").read_text()
           formula = re.sub(
               r'(url "https://github\.com/[^"]*/archive/refs/tags/)v[^"]*(\.tar\.gz")',
               rf"\g<1>v{version}\g<2>", formula, count=1,

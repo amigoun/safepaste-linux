@@ -6,8 +6,16 @@
 # at all. The trade is a slower install and a dependency on Homebrew's Python.
 #
 # Install:
-#   brew tap amigoun/tap https://github.com/amigoun/safepaste-linux
-#   brew install safepaste
+#   brew tap amigoun/safepaste https://github.com/amigoun/safepaste-linux
+#   brew install amigoun/safepaste/safepaste
+#
+# This file lives at Formula/ rather than under packaging/ for one reason: that is
+# where `brew tap` looks. With it anywhere else the tap succeeds and the install
+# then reports no such formula, so the repository doubles as its own tap.
+#
+# The fully-qualified name on the second line is not decoration. Current Homebrew
+# treats third-party taps as untrusted and refuses to install from them by bare
+# name; naming the formula in full is how you say you meant this one.
 #
 # The PyObjC resources are what make the tray, the hotkey and keystroke injection
 # work. Without them the CLI and the clipboard guard still function, so they are
@@ -51,6 +59,10 @@ class Safepaste < Formula
 
   def install
     virtualenv_install_with_resources
+    # launchd will not create a missing directory for the log it is told to write,
+    # and it fails quietly when it cannot -- `brew services start` reports success
+    # and nothing runs.
+    (var/"log").mkpath
   end
 
   service do

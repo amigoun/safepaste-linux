@@ -1,6 +1,8 @@
 # SafePaste
 
-A local secret guard for the Linux clipboard.
+A local secret guard for the clipboard, on Linux, macOS and Windows. (The
+repository is still called `safepaste-linux` — it was written for Wayland first and
+the URL is not worth breaking.)
 
 Repository scanners catch secrets at commit time. Nothing catches them at *paste*
 time — and pasting into a browser, an LLM chat, Slack or a ticket is the last
@@ -50,9 +52,17 @@ Other modes are available from Preferences: `ask` (leave the original, ask first
 
 ## Install
 
+Every release ships a `.deb`, a Windows archive, and manifests for Homebrew and
+Scoop with hashes generated during the build — never by hand, because a wrong one
+fails at the download step and says nothing useful about why.
+
+### Ubuntu / Debian
+
 ```sh
-./packaging/build-deb.sh
-sudo apt install ./dist/safepaste_0.3.0_all.deb
+# from a release
+sudo apt install ./safepaste_*_all.deb
+# or from a checkout
+./packaging/build-deb.sh && sudo apt install ./dist/safepaste_*_all.deb
 ```
 
 The package enables a **systemd user unit**, so protection starts at your next
@@ -60,21 +70,46 @@ login. To start it in the session you already have open:
 
 ```sh
 systemctl --user start safepaste.service
+python3 -m safepaste.hotkey install     # binds Ctrl+Alt+V, writes your gsettings
 ```
 
-Then bind the on-demand shortcut (as yourself, not root — it writes your
-gsettings):
+Run the hotkey step as yourself, not root. Without root, `./install.sh` installs
+under `~/.local` instead; either way you need `python3-xlib` and `python3-regex`
+from the archive, which the `.deb` depends on and `install.sh` does not.
+
+### macOS
 
 ```sh
-python3 -m safepaste.hotkey install     # Ctrl+Alt+V
+brew tap amigoun/safepaste https://github.com/amigoun/safepaste-linux
+brew install amigoun/safepaste/safepaste
+brew services start safepaste
 ```
 
-Without root, `./install.sh` installs under `~/.local` instead. Either way you
-need two packages from the archive:
+A formula rather than a cask, so it builds from source and no notarised binary —
+and so no Apple Developer subscription — is involved. Name the formula in full:
+current Homebrew treats third-party taps as untrusted and declines to install from
+them by bare name.
+
+### Windows
+
+```powershell
+scoop install https://github.com/amigoun/safepaste-linux/releases/latest/download/safepaste.json
+```
+
+Or take `safepaste-*-win64.zip` from the release and run `safepaste-daemon.exe`.
+The executables are unsigned — a certificate costs a few hundred a year and Scoop
+does not need one — so SmartScreen may warn on first run.
+
+### Any platform, from source
 
 ```sh
-sudo apt install python3-xlib python3-regex
+pip install git+https://github.com/amigoun/safepaste-linux
 ```
+
+That gives you the CLI and the guard. It deliberately does **not** pull in
+PyGObject, which builds against system GTK headers; on Linux the tray and dialogs
+want `python3-gi` from apt, and `safepaste-daemon` will tell you so rather than
+printing an import traceback.
 
 ## Usage
 
@@ -249,68 +284,78 @@ editing the vendored copy. Two SafePaste-only keys are honoured:
 - `default_off = true` — ships inactive but switchable, for anything too noisy to
   have on by default. This is how the high-entropy detector stays opt-in.
 
-## macOS
+## Platforms
 
-**Unverified on real hardware.** The macOS backend was written on Linux, with no
-Mac, no PyObjC and no toolchain to hand. Its logic — change-count polling,
-own-write suppression, UTI handling, multi-representation writes — is covered by 29
-tests against a fake pasteboard, and the portable detector and policy layers are the
-same code Linux runs. But not one actual AppKit call has ever executed. Treat first
-run as the real test.
+The detector, the redactor and the policy layer are one body of code on all three;
+only the clipboard, tray, hotkey and injection are per-platform, behind a `Backend`
+protocol that returns `None` for anything an OS cannot do. The portable layers then
+degrade instead of failing, which is why the table has honest gaps rather than
+stubs that pretend.
+
+| | Linux (GNOME/Wayland) | macOS | Windows |
+|---|---|---|---|
+| Clipboard monitoring | XFIXES via XWayland | `NSPasteboard.changeCount` | `GetClipboardSequenceNumber` + format listener |
+| Redaction | ✓ | ✓ | ✓ |
+| **Rich formatting preserved** | ✗ `wl-copy` is one MIME type per call | ✓ multi-representation writes | ✗ plain formats only; `CF_HTML` carries byte offsets that a redaction invalidates |
+| Notifications | ✓ GNOME notifications | ✓ `osascript` | logs only — a balloon needs the tray window, which now exists |
+| Tray icon | ✓ hand-rolled StatusNotifierItem | ✓ `NSStatusItem` | ✓ `Shell_NotifyIcon` |
+| Global hotkey | ✓ `Ctrl+Alt+V` via gsettings | ✓ `Cmd+Alt+V` via Carbon | ✓ `Ctrl+Alt+V` via `RegisterHotKey` |
+| Keystroke injection | RemoteDesktop portal (consent once) | `CGEventPost` (needs Accessibility) | `SendInput` |
+| Real paste interception | impossible on Wayland | possible via `CGEventTap`, not built | possible via `WH_KEYBOARD_LL`, not built |
+| **Per-app policy** | impossible without a Shell extension | ✓ bundle identifier | ✓ executable name |
+
+Per-app policy applies to the on-demand shortcut, which is the only path that knows
+where the paste is going — pressing it inside a password manager can legitimately do
+nothing. Copy-time redaction cannot know the destination on any OS, because at copy
+time there isn't one yet.
+
+### How each backend is verified
+
+Linux is checked live on a real desktop: `scripts/verify-live.py` runs 11 end-to-end
+checks against the actual clipboard. macOS and Windows are checked on CI runners
+against their real clipboard APIs — 30 and 33 checks respectively, on every push.
+Both scripts exit 77 when run on the wrong OS, so a job cannot silently verify
+nothing, and all three save and restore your clipboard and print lengths rather than
+content.
+
+That distinction earned its keep. The unit tests drive *fake* pasteboards, so they
+establish the logic is right and say nothing about whether the platform calls are:
+a `SendInput` union sized by the wrong struct, a window handle truncated by a
+missing ctypes signature, and a UTF-16 length counted in code points instead of code
+units were each found by a machine running the real API, not by a test.
 
 ```sh
-python3 -m pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz regex
-python3 -m safepaste rules --stats        # portable core: should just work
-python3 -m safepaste.backend.darwin       # self-check against the real pasteboard
-python3 -m safepaste.service -v           # the polling service
+python3 -m safepaste.backend.darwin     # macOS: self-check against the pasteboard
+python3 -m safepaste.backend.windows    # Windows: same, against the real clipboard
 ```
 
-The self-check saves and restores your clipboard and prints lengths, never content.
+### Where configuration lives
 
-### What works, and what is not built yet
+| Linux | `~/.config/safepaste/` |
+|---|---|
+| macOS | `~/Library/Application Support/SafePaste/` |
+| Windows | `%APPDATA%\SafePaste\` |
 
-| | macOS | Linux |
-|---|---|---|
-| Clipboard monitoring | `NSPasteboard.changeCount` polling | XFIXES via XWayland |
-| Redaction | ✓ | ✓ |
-| **Rich formatting preserved** | ✓ multi-representation writes | ✗ `wl-copy` is one MIME type per call |
-| Notifications | `osascript` | GNOME notifications |
-| Keystroke injection | `CGEventPost` (needs Accessibility) | RemoteDesktop portal |
-| Tray icon | not built | ✓ StatusNotifierItem |
-| Global hotkey | not built | ✓ `Ctrl+Alt+V` |
-| Real paste interception | **possible** via `CGEventTap` | impossible on Wayland |
-| **Per-app policy** | **possible** via `NSWorkspace` | impossible without a Shell extension |
+`$XDG_CONFIG_HOME` wins on any platform if you set it.
 
-macOS is a friendlier target than Wayland, and the Linux backend's size is
-misleading about the difficulty: 877 of its lines hand-roll StatusNotifierItem only
-because AppIndicator would drag GTK3 into a GTK4 process, and 330 implement a portal
-handshake only because Wayland forbids synthetic input. Neither problem exists here.
+### The most valuable things not yet built
 
-Two things macOS could do that GNOME 46 cannot, and which are the most valuable
-things to build next:
-
-- **Real `Cmd+V` interception** via `CGEventTap`. Note the system *disables* a tap
-  that responds too slowly, so a Python tap on every keystroke is a poor bet — this
-  belongs in native code.
-- **Per-application policy** — "always redact into a browser, never into 1Password"
-  — via `NSWorkspace.frontmostApplication.bundleIdentifier`. This is precisely what
-  `org.gnome.Shell.Introspect` refuses to tell us on GNOME, so macOS gets for free
-  the feature Linux needs a Shell extension for.
-
-The tray and hotkey are absent rather than stubbed: `Backend` returns `None` for any
-capability a platform lacks, and the portable layers degrade instead of failing. A
-macOS user gets monitoring, redaction and notifications, and reaches the on-demand
-path through `safepaste redact`.
-
-Configuration lives in `~/Library/Application Support/SafePaste/` (or
-`$XDG_CONFIG_HOME` if you set it).
+- **Real paste interception** — `CGEventTap` on macOS, `WH_KEYBOARD_LL` on Windows.
+  This would make per-app policy automatic rather than shortcut-only. Note that
+  macOS *disables* a tap that responds too slowly, so a Python tap on every
+  keystroke is a poor bet; that belongs in native code.
+- **A GNOME Shell extension**, which is the only way Linux gets the focused
+  application's identity — `org.gnome.Shell.Introspect` returns `Access denied`.
+  The daemon's D-Bus surface exists precisely so an extension can call it.
+- **`CF_HTML` preservation on Windows**, which means recomputing the byte offsets in
+  its header after redaction rather than dropping the flavour.
 
 ## Development
 
 ```sh
 python3 -m venv --system-site-packages .venv   # for the distro's PyGObject/GTK4
 .venv/bin/pip install regex python-xlib pytest
-.venv/bin/python -m pytest -q                  # 86 tests
+.venv/bin/python -m pytest -q                  # 223 tests
 ```
 
 `--system-site-packages` is required: GTK4 and libadwaita come from the distro's
