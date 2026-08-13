@@ -19,7 +19,6 @@ selection handshake including INCR for large transfers.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import subprocess
 import time
@@ -27,6 +26,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from gi.repository import GLib
+
+from ..backend import ClipboardEvent, content_hash
 
 log = logging.getLogger(__name__)
 
@@ -47,26 +48,17 @@ OWN_WRITE_TTL = 10.0
 READ_TIMEOUT = 2.0
 
 
-def content_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+def _has_rich_flavours(types: list[str]) -> bool:
+    """Whether a plain-text replacement would discard something.
 
-
-@dataclass
-class ClipboardEvent:
-    text: str
-    mime: str
-    digest: str
-    # Every flavour the clipboard was offering, so the UI can be honest about
-    # what a replacement costs: wl-copy serves one MIME type per invocation, so
-    # redacting a rich selection drops text/html and any private flavours.
-    types: tuple[str, ...] = ()
-
-    @property
-    def has_rich_flavours(self) -> bool:
-        return any(
-            t not in TEXT_MIME_PREFERENCE and not t.startswith("text/plain")
-            for t in self.types
-        )
+    Lives here rather than on ClipboardEvent because it is entirely a statement
+    about *MIME* naming. A macOS backend answers the same question about UTIs, and
+    portable code must never parse either.
+    """
+    return any(
+        t not in TEXT_MIME_PREFERENCE and not t.startswith("text/plain")
+        for t in types
+    )
 
 
 @dataclass
@@ -139,8 +131,11 @@ class ClipboardReader:
         text = proc.stdout.decode("utf-8", "replace")
         if not text:
             return None
-        return ClipboardEvent(
-            text=text, mime=mime, digest=content_hash(text), types=tuple(types)
+        return ClipboardEvent.of(
+            text,
+            flavour=mime,
+            has_rich_flavours=_has_rich_flavours(types),
+            flavours=tuple(types),
         )
 
 

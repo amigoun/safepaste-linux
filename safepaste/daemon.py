@@ -1,25 +1,22 @@
-"""The resident daemon: watch, detect, redact, and expose a D-Bus surface.
+"""The Linux front end: a GLib main loop and a D-Bus service around `Guard`.
 
-The fail-safe ordering in `redact` mode is deliberate and worth stating: the
-clipboard is replaced with the redacted text *before* the dialog is shown, and
-the original is held in memory only. If the user ignores the dialog entirely, or
-it fails to appear, or the daemon is killed mid-decision, the clipboard is
-already safe. The alternative — ask first, replace second — leaves the raw secret
-sitting on the clipboard during exactly the window where the user is distracted.
+Everything about *what to do* with a detected secret lives in `safepaste.guard`,
+which has no desktop dependencies. This file supplies only the two things GLib and
+D-Bus are here for: something to run the event loop, and an IPC surface.
 
-The D-Bus interface is also the seam for the optional GNOME Shell extension. The
-extension cannot itself run a rule engine, but it *can* see which window has
-focus and grab a real Ctrl+V, so it calls Inspect/Redact here and applies
-per-application policy of its own.
+That surface is also the seam for the optional GNOME Shell extension. An extension
+cannot run a rule engine, but it can grab a real Ctrl+V inside the compositor and
+see which window has focus, so it calls Inspect/Redact here and applies
+per-application policy of its own — the one thing `org.gnome.Shell.Introspect`
+refuses to make possible from outside.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import pathlib
-import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from typing import Any
 
 import gi
 
@@ -27,11 +24,8 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
 from . import config as config_mod
-from .clipboard.monitor import ClipboardEvent, XFixesMonitor
-from .clipboard.writer import ClipboardWriter
-from .detector import Detector, load_default, summarise, value_hash
-from .redactor import RedactionStyle, redact
-from .session import LockWatcher
+from .backend import Backend, get_backend
+from .guard import Guard
 
 log = logging.getLogger(__name__)
 
@@ -85,97 +79,78 @@ INTROSPECTION = f"""
 """
 
 
-@dataclass
-class HeldOriginal:
-    """A pre-redaction clipboard value, kept in memory for a short window."""
+class _GLibTimer:
+    """Guard's one-shot scheduler, backed by the GLib main loop."""
 
-    text: str
-    digest: str
-    expires_at: float
-    labels: tuple[str, ...]
+    def schedule(self, seconds: float, fn) -> Any:
+        # GLib expects the callback to report whether it wants rescheduling;
+        # Guard's contract is one-shot, so always stop.
+        return GLib.timeout_add_seconds(int(seconds), lambda: (fn(), False)[1])
 
-    @property
-    def alive(self) -> bool:
-        return time.monotonic() < self.expires_at
+    def cancel(self, handle: Any) -> None:
+        if handle is not None:
+            GLib.source_remove(handle)
 
 
 class Daemon:
+    """GLib/D-Bus shell. Policy is delegated to Guard."""
+
     def __init__(
         self,
         cfg: config_mod.Config | None = None,
         *,
-        on_detection: Callable[[list, object, object], None] | None = None,
+        on_detection=None,
+        backend: Backend | None = None,
     ) -> None:
-        self.config = cfg or config_mod.load()
-        for warning in self.config._warnings:
-            log.warning("config: %s", warning)
-
-        self.detector = self._build_detector()
-        self.writer = ClipboardWriter()
-        self.monitor = XFixesMonitor(on_change=self._on_clipboard_change)
-        self.locks = LockWatcher()
-        # Created lazily: building it would provoke a consent dialog at login
-        # for a feature that is off by default.
-        self._injector = None
+        # Interposed rather than passed straight through: the bus signal must
+        # fire for every detection regardless of whether a front end is attached,
+        # and Guard should not know that D-Bus exists.
+        self._forward_detection = on_detection
+        self.guard = Guard(
+            cfg,
+            backend=backend or get_backend(),
+            on_detection=self._on_detection,
+            timer=_GLibTimer(),
+        )
         self.loop = GLib.MainLoop()
-
-        self._paused_until = 0.0
-        self._held: HeldOriginal | None = None
-        self._held_timer: int | None = None
-        self._last_finding_count = 0
-        self._last_secret_hashes: tuple[str, ...] = ()
-        # Injected by the UI layer; a headless daemon simply has no presenter.
-        self.on_detection = on_detection
         self._owner_id: int | None = None
         self._registration_id: int | None = None
         self._connection: Gio.DBusConnection | None = None
 
-    # -- setup -------------------------------------------------------------
-
-    def _build_detector(self) -> Detector:
-        extra = self.config.extra_rule_paths()
-        if extra:
-            log.info("loading %d extra rule file(s)", len(extra))
-        ruleset = load_default(extra_paths=extra)
-        return Detector(
-            ruleset,
-            categories=self.config.category_set,
-            excluded_hashes=self.config.excluded_hash_set,
-            regex_timeout=self.config.regex_timeout,
-            max_scan_bytes=self.config.max_scan_bytes,
-        )
+    # Delegation, so the D-Bus handlers and the GTK front end need no knowledge
+    # of where the policy actually lives.
+    @property
+    def config(self) -> config_mod.Config:
+        return self.guard.config
 
     @property
-    def redaction_style(self) -> RedactionStyle:
-        return RedactionStyle(
-            placeholder=self.config.placeholder,
-            label_rules=self.config.label_rules,
-            keep_prefix=self.config.keep_prefix,
-        )
+    def detector(self):
+        return self.guard.detector
 
     @property
     def paused(self) -> bool:
-        return time.monotonic() < self._paused_until
+        return self.guard.paused
+
+    safe_paste = property(lambda self: self.guard.safe_paste)
+    restore_original = property(lambda self: self.guard.restore_original)
+    exclude_last_value = property(lambda self: self.guard.exclude_last_value)
+    set_mode = property(lambda self: self.guard.set_mode)
+    set_paused = property(lambda self: self.guard.set_paused)
+    reload = property(lambda self: self.guard.reload)
+
+    def _on_detection(self, findings, result, event) -> None:
+        from .detector import summarise
+
+        self._emit_detected(summarise(findings))
+        if self._forward_detection is not None:
+            self._forward_detection(findings, result, event)
 
     # -- run ---------------------------------------------------------------
 
     def start(self) -> bool:
-        """Attach to the clipboard and the bus, without running a main loop.
-
-        Split from `run` so the GTK front end can drive its own Adw.Application
-        loop instead — two GLib main loops in one process would fight.
-        """
-        if not self.monitor.start():
-            log.error("clipboard monitor failed to start; nothing to do")
+        if not self.guard.start():
             return False
-        self.locks.start()
         self._own_bus_name()
-        log.info(
-            "safepaste running: mode=%s categories=%d rules=%d",
-            self.config.mode,
-            len(self.config.categories),
-            len(self.detector.active_rules),
-        )
         return True
 
     def run(self) -> int:
@@ -191,179 +166,12 @@ class Daemon:
         return 0
 
     def shutdown(self) -> None:
-        if self._injector is not None:
-            self._injector.close()
-        self.monitor.stop()
-        self._forget_original()
+        self.guard.stop()
         if self._owner_id is not None:
             Gio.bus_unown_name(self._owner_id)
             self._owner_id = None
         if self.loop.is_running():
             self.loop.quit()
-
-    # -- clipboard pipeline -------------------------------------------------
-
-    def _on_clipboard_change(self, event: ClipboardEvent) -> None:
-        if self.config.mode == "off" or self.paused:
-            return
-        if self.locks.locked:
-            # wl-clipboard cannot complete a transfer while the lock screen
-            # holds keyboard focus, and nothing can paste anyway.
-            log.debug("session locked; ignoring clipboard change")
-            return
-
-        findings = self.detector.scan(event.text)
-        self._last_finding_count = len(findings)
-        if not findings:
-            return
-
-        info = summarise(findings)
-        # Content-free by construction: labels and counts only.
-        log.info(
-            "detected %s secret(s) on the clipboard: %s",
-            info["secrets"],
-            ", ".join(info["labels"]),
-        )
-        self._last_secret_hashes = tuple(
-            value_hash(event.text[f.start : f.end]) for f in findings
-        )
-
-        result = redact(event.text, findings, self.redaction_style)
-
-        if self.config.mode == "redact":
-            # Replace first. See the module docstring: this is what makes
-            # ignoring the dialog safe.
-            self.monitor.note_own_write(result.text)
-            if self.writer.write(result.text):
-                self._hold_original(event, result.labels)
-            else:
-                log.error("could not replace the clipboard; it still holds the secret")
-
-        self._emit_detected(info)
-        if self.on_detection is not None:
-            self.on_detection(findings, result, event)
-
-    def _hold_original(self, event: ClipboardEvent, labels: tuple[str, ...]) -> None:
-        self._forget_original()
-        ttl = self.config.restore_timeout_secs
-        if ttl <= 0:
-            return
-        self._held = HeldOriginal(
-            text=event.text,
-            digest=event.digest,
-            expires_at=time.monotonic() + ttl,
-            labels=labels,
-        )
-        self._held_timer = GLib.timeout_add_seconds(ttl, self._on_hold_expired)
-
-    def _on_hold_expired(self) -> bool:
-        log.debug("retention window elapsed; dropping the held original")
-        self._forget_original()
-        return False  # one-shot
-
-    def _forget_original(self) -> None:
-        if self._held_timer is not None:
-            GLib.source_remove(self._held_timer)
-            self._held_timer = None
-        if self._held is not None:
-            # Best effort: rebind the attribute so the only strong reference to
-            # the plaintext goes away promptly. Python cannot guarantee the bytes
-            # are scrubbed from the heap, and with swap enabled they may already
-            # have reached disk — the README says so rather than implying more.
-            self._held.text = ""
-            self._held = None
-
-    def restore_original(self) -> bool:
-        if self._held is None or not self._held.alive:
-            log.info("no original available to restore")
-            return False
-        text = self._held.text
-        self.monitor.note_own_write(text)
-        ok = self.writer.write(text)
-        if ok:
-            log.info("restored the original clipboard value")
-            self._forget_original()
-        return ok
-
-    def safe_paste(self) -> int:
-        """Sanitise whatever is on the clipboard right now, on demand."""
-        if self.locks.refresh():
-            log.info("safe paste ignored: session is locked")
-            return 0
-        event = self.monitor.reader.read_text()
-        if event is None:
-            return 0
-        findings = self.detector.scan(event.text)
-        if not findings:
-            log.info("safe paste: clipboard is clean")
-            return 0
-        result = redact(event.text, findings, self.redaction_style)
-        self.monitor.note_own_write(result.text)
-        if not self.writer.write(result.text):
-            return 0
-        self._hold_original(event, result.labels)
-        log.info("safe paste: removed %d secret(s)", result.secrets_removed)
-        self._complete_paste()
-        return result.secrets_removed
-
-    def _complete_paste(self) -> None:
-        """Send the paste keystroke, if the user opted in.
-
-        Failure here is deliberately quiet and non-fatal: the sanitised text is
-        already on the clipboard, so the worst case is that the user presses
-        Ctrl+V themselves — which is exactly the default behaviour anyway.
-        """
-        if not self.config.auto_paste:
-            return
-        if self._injector is None:
-            from .inject import PasteInjector, available
-
-            if not available():
-                log.info("no keyboard injection portal; leaving the paste to you")
-                return
-            self._injector = PasteInjector(
-                restore_token=self.config.portal_restore_token or None,
-                on_restore_token=self._store_restore_token,
-            )
-        self._injector.paste()
-
-    def _store_restore_token(self, token: str) -> None:
-        self.config.portal_restore_token = token
-        config_mod.save(self.config)
-        log.debug("stored the portal restore token; consent will not be asked again")
-
-    def exclude_last_value(self) -> bool:
-        """Stop flagging the values from the most recent detection."""
-        if not self._last_secret_hashes:
-            return False
-        merged = tuple(
-            dict.fromkeys(self.config.excluded_hashes + self._last_secret_hashes)
-        )
-        self.config.excluded_hashes = merged
-        config_mod.save(self.config)
-        self.detector = self._build_detector()
-        log.info("added %d value(s) to the exclusion list", len(self._last_secret_hashes))
-        return True
-
-    def set_mode(self, mode: str) -> None:
-        if mode not in config_mod.MODES:
-            log.warning("ignoring unknown mode %r", mode)
-            return
-        self.config.mode = mode
-        config_mod.save(self.config)
-        log.info("mode set to %s", mode)
-
-    def set_paused(self, paused: bool, seconds: int = 0) -> None:
-        self._paused_until = time.monotonic() + seconds if paused else 0.0
-        if paused:
-            log.info("protection paused for %ds", seconds)
-        else:
-            log.info("protection resumed")
-
-    def reload(self) -> None:
-        self.config = config_mod.load()
-        self.detector = self._build_detector()
-        log.info("reloaded: %d rules active", len(self.detector.active_rules))
 
     # -- D-Bus -------------------------------------------------------------
 
@@ -429,11 +237,11 @@ class Daemon:
             elif method == "Inspect":
                 (text,) = params.unpack()
                 invocation.return_value(
-                    GLib.Variant("(s)", (json.dumps(summarise(self.detector.scan(text))),))
+                    GLib.Variant("(s)", (json.dumps(self.guard.inspect(text)),))
                 )
             elif method == "Redact":
                 (text,) = params.unpack()
-                result = redact(text, self.detector.scan(text), self.redaction_style)
+                result = self.guard.redact_text(text)
                 invocation.return_value(
                     GLib.Variant("(si)", (result.text, result.secrets_removed))
                 )
@@ -472,7 +280,7 @@ class Daemon:
         return {
             "Mode": lambda: GLib.Variant("s", self.config.mode),
             "Paused": lambda: GLib.Variant("b", self.paused),
-            "LastFindingCount": lambda: GLib.Variant("i", self._last_finding_count),
+            "LastFindingCount": lambda: GLib.Variant("i", self.guard.last_finding_count),
             "Version": lambda: GLib.Variant("s", __version__),
         }.get(prop, lambda: None)()
 

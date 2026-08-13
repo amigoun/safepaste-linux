@@ -82,17 +82,12 @@ class SafePasteApp(Adw.Application):
     # -- tray --------------------------------------------------------------
 
     def _start_tray(self) -> None:
-        # Imported lazily and defensively: the tray speaks StatusNotifierItem, so
-        # on a desktop with no watcher there is simply nothing to attach to. That
-        # must not prevent clipboard protection from running.
+        # Asked of the backend rather than imported: a platform with no status-icon
+        # mechanism returns None, and a desktop with the mechanism but no host
+        # running returns False from start(). Neither may stop clipboard
+        # protection, which is the part that matters.
         try:
-            from .ui.tray import TrayIndicator
-        except ImportError as exc:
-            log.info("tray unavailable (%s); running without a status icon", exc)
-            return
-
-        try:
-            self.tray = TrayIndicator(
+            self.tray = self.daemon.guard.backend.tray(
                 on_mode=self._set_mode,
                 on_pause=lambda secs: self._set_paused(True, secs),
                 on_resume=lambda: self._set_paused(False, 0),
@@ -100,6 +95,9 @@ class SafePasteApp(Adw.Application):
                 on_preferences=self.show_preferences,
                 on_quit=self.quit,
             )
+            if self.tray is None:
+                log.info("this platform offers no status icon; running without one")
+                return
             if self.tray.start():
                 self.tray.set_state(self.config.mode, self.daemon.paused)
             else:
