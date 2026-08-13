@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from safepaste.backend import (
@@ -13,6 +15,15 @@ from safepaste.backend import (
     HotkeyBinder,
     content_hash,
     get_backend,
+)
+
+# Constructing the *Linux* backend imports gi, which does not exist on macOS. The
+# tests below are therefore platform-specific by nature, not portable ones that
+# happen to break — so they skip rather than fail. Discovered by the macos-latest
+# CI job on its first run.
+requires_gi = pytest.mark.skipif(
+    importlib.util.find_spec("gi") is None,
+    reason="python3-gi absent, so the Linux backend cannot be constructed here",
 )
 
 
@@ -78,6 +89,7 @@ def test_unknown_platform_points_at_the_contract() -> None:
 # --- the Linux backend satisfies the protocols -----------------------------
 
 
+@requires_gi
 def test_linux_clipboard_products_match_the_protocols() -> None:
     """Structural check only — nothing here talks to a real clipboard."""
     backend = get_backend("linux")
@@ -90,6 +102,7 @@ def test_linux_clipboard_products_match_the_protocols() -> None:
     assert isinstance(monitor.reader, ClipboardReader)
 
 
+@requires_gi
 def test_linux_hotkey_binder_matches_the_protocol() -> None:
     binder = get_backend("linux").hotkey_binder()
     assert binder is not None

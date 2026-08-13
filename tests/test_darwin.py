@@ -14,6 +14,8 @@ itself bumps the count, `stringForType_` returns None when the type is absent, a
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from safepaste.backend import (
@@ -406,6 +408,10 @@ def test_polling_shell_does_not_claim_removal_in_notify_mode(tmp_path, monkeypat
     assert "removed" not in notes[0][0]
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("gi") is None,
+    reason="python3-gi absent, so the Linux backend cannot be constructed here",
+)
 def test_polling_shell_refuses_a_non_poll_backend(tmp_path, monkeypatch) -> None:
     """Linux's fd-based monitor cannot be driven by a sleep loop; say so clearly."""
     import safepaste.config as config_mod

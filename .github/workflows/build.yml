@@ -72,10 +72,11 @@ jobs:
           python3 -m pip install --break-system-packages \
             regex pyobjc-framework-Cocoa pyobjc-framework-Quartz pytest
 
-      - name: The portable suite must pass identically here
-        # Same code, same assertions, different OS. If this diverges from the
-        # Linux run, something in the "portable" core is not portable.
-        run: python3 -m pytest -q
+      - name: The suite must pass here too
+        # Same code, same assertions, different OS. A handful of tests construct
+        # the Linux backend and so skip here; anything that *fails* means
+        # something in the portable core is not actually portable.
+        run: python3 -m pytest -q -rs
 
       - name: Backend self-check against the real pasteboard
         run: python3 -m safepaste.backend.darwin
