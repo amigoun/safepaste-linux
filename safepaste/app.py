@@ -19,7 +19,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib  # noqa: E402
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from . import config as config_mod
 from .daemon import Daemon
@@ -42,6 +42,12 @@ class SafePasteApp(Adw.Application):
         self.tray = None
         self._prefs_window = None
         self._current_dialog = None
+        # A window that is never presented, existing only to be the dialogs'
+        # transient parent. SafePaste has no primary window, and GTK complains about
+        # every parentless dialog; this is the cheapest thing that satisfies it.
+        # Deliberately not associated with the application, so it cannot influence
+        # the application's lifecycle.
+        self._dialog_parent: Gtk.Window | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -55,6 +61,8 @@ class SafePasteApp(Adw.Application):
             self.quit()
             return
 
+        self._dialog_parent = Gtk.Window()
+        self._dialog_parent.set_default_size(1, 1)
         self._install_actions()
         self._start_tray()
 
@@ -160,6 +168,7 @@ class SafePasteApp(Adw.Application):
             can_restore=self.config.restore_timeout_secs > 0,
             restore_seconds=self.config.restore_timeout_secs,
             formatting_lost=getattr(event, "has_rich_flavours", False),
+            parent=self._dialog_parent,
             on_restore=self._on_restore,
             on_exclude=self._on_exclude,
         )

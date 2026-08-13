@@ -216,6 +216,8 @@ class DarwinClipboardMonitor:
         self._handle: Any = None
         self._last_change_count: int | None = None
         self._own_writes: dict[str, float] = {}
+        # Set by Guard; see ClipboardMonitor.should_read.
+        self.should_read = None
         self._last_digest: str | None = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -262,6 +264,10 @@ class DarwinClipboardMonitor:
             return
         self._last_change_count = current
 
+        if self.should_read is not None and not self.should_read():
+            log.debug("skipping the clipboard read; the caller is not interested")
+            self._last_digest = None
+            return
         event = self.reader.read_text()
         if event is None:
             self._last_digest = None

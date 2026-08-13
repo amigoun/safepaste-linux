@@ -124,6 +124,12 @@ class ClipboardMonitor(Protocol):
 
     reader: ClipboardReader
 
+    # Consulted before each read; None means "always read". Exists because reading
+    # can be expensive or outright blocked -- on GNOME/Wayland wl-clipboard blocks
+    # until it times out while the lock screen holds keyboard focus -- and the
+    # caller may already know the answer is going to be discarded.
+    should_read: Callable[[], bool] | None
+
     def start(self) -> bool: ...
     def stop(self) -> None: ...
 

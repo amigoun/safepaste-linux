@@ -113,10 +113,18 @@ def present_detection(
     can_restore: bool,
     restore_seconds: int,
     formatting_lost: bool,
+    parent: Gtk.Window | None = None,
     on_restore=None,
     on_exclude=None,
 ) -> DetectionDialog:
-    """Build, wire and show the dialog. Returns it so callers can close it."""
+    """Build, wire and show the dialog. Returns it so callers can close it.
+
+    `parent` should be supplied even though the dialog works without one. GTK logs
+    "AdwMessageDialog mapped without a transient parent. This is discouraged." for
+    every parentless dialog -- nine times in one afternoon of real use -- and being
+    discouraged today tends to become unsupported later. A never-presented window is
+    enough to satisfy it; verified that the dialog still maps and is visible.
+    """
     dialog = DetectionDialog(
         secrets=secrets,
         labels=labels,
@@ -124,6 +132,7 @@ def present_detection(
         can_restore=can_restore,
         restore_seconds=restore_seconds,
         formatting_lost=formatting_lost,
+        parent=parent,
     )
 
     def _on_response(dlg: DetectionDialog, response: str) -> None:

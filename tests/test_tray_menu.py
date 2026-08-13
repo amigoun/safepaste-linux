@@ -213,3 +213,53 @@ def test_the_declared_interface_and_the_getters_agree(tray: TrayIndicator) -> No
             f"{prop.name} is declared {prop.signature!r} but the getter returns "
             f"{value.get_type_string()!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# The detection dialog's transient parent.
+#
+# GTK logs "AdwMessageDialog mapped without a transient parent. This is
+# discouraged." for every parentless dialog -- nine times in one afternoon of real
+# use, the most frequent line in the journal.
+# ---------------------------------------------------------------------------
+
+
+def test_the_dialog_accepts_a_transient_parent() -> None:
+    # require_version before importing Adw, or PyGI warns -- and the suite runs
+    # with -W error, so a warning is a failure. safepaste.ui.dialog does this
+    # itself, but a test must not depend on import order to be correct.
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gtk
+
+    Adw.init()
+    from safepaste.ui.dialog import DetectionDialog
+
+    parent = Gtk.Window()
+    dialog = DetectionDialog(
+        secrets=1, labels=("GitHub PAT",), chars_kept=10,
+        can_restore=True, restore_seconds=60, formatting_lost=False, parent=parent,
+    )
+    assert dialog.get_transient_for() is parent
+    # Never presented, so the parent must stay invisible; only its existence matters.
+    assert parent.get_visible() is False
+
+
+def test_the_dialog_still_works_without_one() -> None:
+    """Degrading is required: a parentless dialog is discouraged, not broken."""
+    import gi
+
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw
+
+    Adw.init()
+    from safepaste.ui.dialog import DetectionDialog
+
+    dialog = DetectionDialog(
+        secrets=1, labels=("GitHub PAT",), chars_kept=10,
+        can_restore=False, restore_seconds=0, formatting_lost=False, parent=None,
+    )
+    assert dialog.get_transient_for() is None
+    assert dialog.get_heading()

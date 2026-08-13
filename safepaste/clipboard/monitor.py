@@ -150,6 +150,8 @@ class XFixesMonitor:
         self.on_change = on_change
         self.reader = reader or ClipboardReader()
         self.own_writes = _OwnWrites()
+        # Set by Guard; see ClipboardMonitor.should_read.
+        self.should_read = None
         self._last_digest: str | None = None
         self._watch_id: int | None = None
         self._display = None
@@ -253,6 +255,14 @@ class XFixesMonitor:
         ) == self._owner_notify
 
     def _handle_change(self) -> None:
+        if self.should_read is not None and not self.should_read():
+            # Measured on a real desktop: the screen locks, a clipboard change
+            # arrives seconds later, and the read blocks for the full timeout before
+            # anything can discard it. The lock is already known by then, so ask
+            # first rather than paying 2s to learn nothing.
+            log.debug("skipping the clipboard read; the caller is not interested")
+            self._last_digest = None
+            return
         event = self.reader.read_text()
         if event is None:
             self._last_digest = None

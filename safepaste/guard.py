@@ -99,6 +99,23 @@ class Guard:
         self._last_secret_hashes: tuple[str, ...] = ()
         self._injector = None
 
+        # Installed last, deliberately: the gate reads `paused`, which needs
+        # _paused_until to exist. Wiring it earlier would make a clipboard change
+        # arriving during construction raise AttributeError.
+        self.monitor.should_read = self._wants_clipboard
+
+    def _wants_clipboard(self) -> bool:
+        """Whether a clipboard change is worth reading at all, before reading it.
+
+        `handle` rejects these cases too, but the read happens *first* and on
+        GNOME/Wayland it blocks for a full 2s timeout while the screen is locked.
+        Measured on a real desktop: the lock was known three seconds before each
+        wasted read. So the question has to be asked before the read, not after.
+        """
+        if self.config.mode == "off" or self.paused:
+            return False
+        return not self.locked
+
     # -- setup -------------------------------------------------------------
 
     def _build_detector(self) -> Detector:
