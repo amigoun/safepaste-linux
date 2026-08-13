@@ -87,7 +87,12 @@ class LinuxBackend(Backend):
 
         return GnomeLockWatcher()
 
-    def hotkey_binder(self) -> HotkeyBinder | None:
+    def hotkey_binder(
+        self, on_pressed: Callable[[], None] | None = None
+    ) -> HotkeyBinder | None:
+        # on_pressed is ignored here by design: the binding carries a command line
+        # that the desktop launches, so the press arrives over D-Bus rather than as
+        # a callback. See Backend.hotkey_binder.
         return _GsettingsHotkeyBinder()
 
     def injector(

@@ -169,6 +169,67 @@ def main() -> int:
         )
         guard.stop()
 
+        # --- the message window and what it unlocks --------------------------
+        # None of this can be exercised off Windows, so it is the whole reason this
+        # script exists.
+        window = backend.message_window()
+        check("message-only window created", window is not None,
+              f"hwnd={getattr(window, 'hwnd', None)}")
+
+        if window is not None:
+            from safepaste.backend.win32_loop import (
+                ClipboardListener,
+                HotkeyBinder,
+                parse_accelerator,
+            )
+
+            # A WM_TIMER round trip proves the pump actually dispatches.
+            fired: list[str] = []
+            window.schedule(0.01, lambda: fired.append("timer"))
+            import time as _time
+            deadline = _time.monotonic() + 3
+            while not fired and _time.monotonic() < deadline:
+                window.pump_once()
+                _time.sleep(0.01)
+            check("the pump dispatches a scheduled timer", fired == ["timer"])
+
+            # RegisterHotKey needs no permission, so this must genuinely succeed.
+            pressed: list[str] = []
+            binder = HotkeyBinder(window, lambda: pressed.append("hit"))
+            accel = "<Control><Alt>F9" if parse_accelerator("<Control><Alt>F9") else "<Control><Alt>9"
+            installed = binder.install(accel)
+            check("a global hotkey registers", installed, f"{accel}")
+            if installed:
+                check("it reports itself installed", binder.installed() is True)
+                # An already-taken chord must be reported, not silently accepted.
+                second = HotkeyBinder(window, lambda: None)
+                second.HOTKEY_ID = 77
+                taken = second.conflicts(accel)
+                check("a taken chord is detected as a conflict", bool(taken),
+                      "; ".join(taken) or "no conflict reported")
+                check("unregistering succeeds", binder.uninstall() is True)
+
+            # AddClipboardFormatListener: real change notification. Write to the
+            # clipboard, pump, and require the monitor's callback to have fired.
+            notified: list[ClipboardEvent] = []
+            listen_monitor = backend.clipboard_monitor(notified.append)
+            listen_monitor.start()
+            listener = ClipboardListener(window, listen_monitor)
+            started = listener.start()
+            check("AddClipboardFormatListener accepted", started)
+            if started:
+                writer.write("safepaste-notification-probe")
+                deadline = _time.monotonic() + 3
+                while not notified and _time.monotonic() < deadline:
+                    window.pump_once()
+                    _time.sleep(0.01)
+                check(
+                    "WM_CLIPBOARDUPDATE reached the monitor",
+                    len(notified) >= 1,
+                    f"{len(notified)} event(s) -- event-driven, no polling involved",
+                )
+                listener.stop()
+
         # --- injection ------------------------------------------------------
         # SendInput needs no permission, so this should genuinely succeed. It types
         # into whatever has focus, which on a CI runner is nothing.

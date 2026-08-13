@@ -84,6 +84,8 @@ class PollingShell:
             timer=self.timer,
         )
         self._stop = False
+        self._hotkey = None
+        self._listener = None
 
         if not hasattr(self.guard.monitor, "poll_once"):
             raise TypeError(
@@ -116,22 +118,58 @@ class PollingShell:
     def stop(self, *_args: object) -> None:
         self._stop = True
 
+    def _attach_platform_extras(self) -> None:
+        """Take whatever optional capabilities this platform offers.
+
+        Both are genuinely optional: without the hotkey the on-demand path is still
+        reachable through the CLI, and without the listener the poll below is not a
+        degraded mode but the designed fallback.
+        """
+        backend = self.guard.backend
+
+        binder = backend.hotkey_binder(on_pressed=self.guard.safe_paste)
+        if binder is not None and binder.available():
+            accel = self.guard.config.safe_paste_hotkey
+            self._hotkey = binder if binder.install(accel) else None
+            if self._hotkey is None:
+                log.info("continuing without a global shortcut")
+
+        listener_factory = getattr(backend, "clipboard_listener", None)
+        if listener_factory is not None:
+            self._listener = listener_factory(self.guard.monitor)
+
     def run(self) -> int:
         if not self.guard.start():
             return 1
+        self._attach_platform_extras()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, self.stop)
 
-        log.info(
-            "polling the clipboard every %.0fms; Ctrl-C to stop", self.interval * 1000
-        )
+        if self._listener is not None:
+            log.info("waiting on clipboard notifications; Ctrl-C to stop")
+        else:
+            log.info(
+                "polling the clipboard every %.0fms; Ctrl-C to stop",
+                self.interval * 1000,
+            )
         try:
             while not self._stop:
+                # Pump first: a hotkey press or a clipboard notification is already
+                # queued by the OS and should be serviced before we sleep again.
+                if not self.guard.backend.pump():
+                    break
+                # Still polled even when notifications are active. The poll is one
+                # integer compare when nothing changed, and it means a missed or
+                # unsupported notification degrades latency rather than correctness.
                 self.guard.monitor.poll_once()
                 self.timer.run_due()
                 time.sleep(self.interval)
         finally:
+            if self._listener is not None:
+                self._listener.stop()
+            if self._hotkey is not None:
+                self._hotkey.uninstall()
             self.guard.stop()
         log.info("stopped")
         return 0

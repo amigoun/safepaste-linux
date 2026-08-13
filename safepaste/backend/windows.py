@@ -521,6 +521,61 @@ class WindowsBackend(Backend):
         self._interval = interval
         self._sleep = sleep
 
+    def message_window(self):
+        """The message-only window, created on first use.
+
+        Held on the backend rather than the shell because three components need the
+        same handle: the hotkey binder, the clipboard listener and (later) the tray.
+        """
+        if getattr(self, "_window", None) is None:
+            from .win32_loop import MessageWindow
+
+            window = MessageWindow()
+            try:
+                created = window.create()
+            except Exception as exc:  # noqa: BLE001
+                # No user32 at all (imported off Windows), or a session with no
+                # desktop. Either way: no window, and the caller carries on without
+                # the features that need one.
+                log.info("no message window available (%s)", exc)
+                created = False
+            self._window = window if created else False
+        return self._window or None
+
+    def hotkey_binder(
+        self, on_pressed: Callable[[], None] | None = None
+    ) -> Any:
+        """RegisterHotKey, which needs the message window.
+
+        Returns None if the window could not be created -- a Windows *service* with
+        no desktop, for instance -- and the portable layers carry on without a
+        shortcut, as they do on any platform that lacks one.
+        """
+        # Checked before the window is created: constructing one is not free, and
+        # there is nothing to deliver a press to.
+        if on_pressed is None:
+            return None
+        window = self.message_window()
+        if window is None:
+            return None
+        from .win32_loop import HotkeyBinder
+
+        return HotkeyBinder(window, on_pressed)
+
+    def clipboard_listener(self, monitor):
+        """Upgrade a polling monitor to WM_CLIPBOARDUPDATE notifications.
+
+        Returns None if there is no window, in which case the caller keeps polling —
+        which is correct, not degraded: the poll is the fallback by design.
+        """
+        window = self.message_window()
+        if window is None:
+            return None
+        from .win32_loop import ClipboardListener
+
+        listener = ClipboardListener(window, monitor)
+        return listener if listener.start() else None
+
     def _clipboard(self) -> Win32Clipboard:
         if self._api is None:
             self._api = _real_clipboard()
@@ -551,6 +606,17 @@ class WindowsBackend(Backend):
     ) -> Injector | None:
         # No token concept: SendInput needs no grant to store.
         return WindowsInjector()
+
+    def pump(self) -> bool:
+        """Drain the message queue, if a window was ever created.
+
+        Cheap when idle, and skipped entirely when there is no window -- a service
+        session with no desktop keeps polling and never pays for this.
+        """
+        window = getattr(self, "_window", None)
+        if not window:
+            return True
+        return window.pump_once()
 
     # hotkey_binder and tray inherit None. RegisterHotKey and Shell_NotifyIcon both
     # need a message pump, which arrives with the tray, not before it. No lock

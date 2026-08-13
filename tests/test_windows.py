@@ -447,3 +447,79 @@ def test_utf16_size_matches_what_ctypes_would_allocate() -> None:
         pytest.skip("wchar_t is not UTF-16 here, so ctypes sizing cannot be compared")
     for text in ("", "plain", "naïve", "a🔐b"):
         assert utf16_size_with_nul(text) == ctypes.sizeof(ctypes.create_unicode_buffer(text))
+
+
+# ---------------------------------------------------------------------------
+# The message window's pure logic.
+#
+# The ctypes parts need Windows; accelerator parsing does not, and it is the part
+# a user can break by hand-editing a config.
+# ---------------------------------------------------------------------------
+
+
+def test_accelerator_parsing_matches_the_gtk_spelling() -> None:
+    """One accelerator syntax across all platforms, so one config means one thing.
+
+    GTK's spelling is the canonical form because that is what the Linux backend
+    already stores; Windows translates rather than inventing its own.
+    """
+    from safepaste.backend.win32_loop import (
+        MOD_ALT,
+        MOD_CONTROL,
+        MOD_NOREPEAT,
+        MOD_SHIFT,
+        MOD_WIN,
+        parse_accelerator,
+    )
+
+    mods, vk = parse_accelerator("<Control><Alt>v")
+    assert mods & MOD_CONTROL and mods & MOD_ALT
+    assert vk == ord("V")
+    # MOD_NOREPEAT: holding the chord must fire once, not continuously.
+    assert mods & MOD_NOREPEAT
+
+    # <Primary> is GTK's portable spelling for Ctrl and must not be rejected.
+    assert parse_accelerator("<Primary>v")[0] & MOD_CONTROL
+    assert parse_accelerator("<Super>v")[0] & MOD_WIN
+    assert parse_accelerator("<Shift><Control>v")[0] & MOD_SHIFT
+    # Letters and digits derive their virtual-key code from the character.
+    assert parse_accelerator("<Control>1")[1] == ord("1")
+    assert parse_accelerator("<Control><Alt>Insert")[1] == 0x2D
+
+
+def test_accelerator_parsing_rejects_what_it_cannot_honour() -> None:
+    from safepaste.backend.win32_loop import parse_accelerator
+
+    # A bare key would be grabbed from every application on the system.
+    assert parse_accelerator("v") is None
+    assert parse_accelerator("") is None
+    assert parse_accelerator("<Control>") is None
+    assert parse_accelerator("<Nonsense>v") is None
+    assert parse_accelerator("<Control>F13") is None  # not in the named table
+    assert parse_accelerator("<Control") is None  # unterminated
+
+
+def test_the_default_hotkey_from_config_is_parseable() -> None:
+    """The shipped default must work on this platform too, not just on Linux."""
+    from safepaste.backend.win32_loop import parse_accelerator
+    from safepaste.config import Config
+
+    assert parse_accelerator(Config().safe_paste_hotkey) is not None
+
+
+def test_hotkey_and_listener_need_a_window(monkeypatch) -> None:
+    """Both must return None rather than raising where no window exists.
+
+    A Windows service with no desktop is a real deployment, and it should still
+    guard the clipboard -- just without a shortcut.
+    """
+    backend = WindowsBackend(api=FakeWin32Clipboard("x"), sleep=_nosleep)
+    monkeypatch.setattr(backend, "message_window", lambda: None)
+    assert backend.hotkey_binder(on_pressed=lambda: None) is None
+    assert backend.clipboard_listener(monitor=object()) is None
+
+
+def test_hotkey_binder_is_not_created_without_a_callback() -> None:
+    """A registered hotkey with nowhere to deliver would be worse than none."""
+    backend = WindowsBackend(api=FakeWin32Clipboard("x"), sleep=_nosleep)
+    assert backend.hotkey_binder(on_pressed=None) is None

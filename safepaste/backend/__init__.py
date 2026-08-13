@@ -210,7 +210,22 @@ class Backend:
     def lock_watcher(self) -> LockWatcher | None:
         return None
 
-    def hotkey_binder(self) -> HotkeyBinder | None:
+    def hotkey_binder(
+        self, on_pressed: Callable[[], None] | None = None
+    ) -> HotkeyBinder | None:
+        """A global-shortcut binder, where the platform has one.
+
+        `on_pressed` exists because the two families deliver a shortcut
+        differently, and the contract has to accommodate both:
+
+        * Linux hands the accelerator to gnome-settings-daemon along with a
+          *command line*, so the desktop launches `gdbus` and the press arrives as
+          a D-Bus call from outside. There is no in-process callback to give, and
+          the argument is ignored.
+        * Windows and macOS post the press to us as a message, so a callback is the
+          only way to receive it — and a binder registered with nowhere to deliver
+          would be worse than no binder at all.
+        """
         return None
 
     def injector(
@@ -222,6 +237,17 @@ class Backend:
 
     def tray(self, **callbacks: Callable) -> Tray | None:
         return None
+
+    def pump(self) -> bool:
+        """Service any platform event queue. False means the platform asked us to stop.
+
+        A no-op for platforms whose events arrive by other means: Linux runs a GLib
+        loop that owns its own dispatch, and macOS currently only polls. Windows
+        needs it, because a message-only window is the single prerequisite for its
+        hotkey, its tray, clipboard *notifications* and eventually a keyboard hook —
+        and none of those are serviced unless someone pumps.
+        """
+        return True
 
 
 def get_backend(name: str | None = None) -> Backend:
