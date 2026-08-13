@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+import sys
 import tomllib
 from dataclasses import dataclass, field, fields
 
@@ -22,9 +23,29 @@ from ..detector.rules import CATEGORIES
 
 log = logging.getLogger(__name__)
 
-CONFIG_DIR = pathlib.Path(
-    os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config")
-) / "safepaste"
+def _config_root() -> pathlib.Path:
+    """Where this platform keeps per-user configuration.
+
+    XDG_CONFIG_HOME is honoured everywhere if set, because a user who sets it
+    means it. Otherwise: ~/.config on Linux, ~/Library on macOS — the backend
+    supplies the segments below that (see Backend.config_dir_name).
+    """
+    override = os.environ.get("XDG_CONFIG_HOME")
+    if override:
+        return pathlib.Path(override)
+    if sys.platform == "darwin":
+        return pathlib.Path.home() / "Library"
+    return pathlib.Path.home() / ".config"
+
+
+def _config_dir() -> pathlib.Path:
+    root = _config_root()
+    if sys.platform == "darwin" and not os.environ.get("XDG_CONFIG_HOME"):
+        return root / "Application Support" / "SafePaste"
+    return root / "safepaste"
+
+
+CONFIG_DIR = _config_dir()
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 RULES_DIR = CONFIG_DIR / "rules"
 

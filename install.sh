@@ -64,7 +64,7 @@ EOF
     chmod 0755 "$BINDIR/$1"
 }
 write_shim safepaste        safepaste.cli
-write_shim safepaste-daemon safepaste.daemon
+write_shim safepaste-daemon safepaste.service
 write_shim safepaste-gui    safepaste.app
 
 # The unit ships with ExecStart=/usr/bin/safepaste-gui for the packaged layout;

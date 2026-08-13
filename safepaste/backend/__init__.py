@@ -14,8 +14,8 @@ clipboard-management protocol and gates reads on keyboard focus. On a desktop
 with ordinary clipboard and input APIs most of that collapses to a few dozen
 lines each.
 
-Sketch of what a macOS backend would bind to, recorded here so the shape of the
-contract is not accidental:
+What the macOS backend (`.darwin`) binds to, which is why the contract has this
+shape:
 
     ClipboardMonitor   poll NSPasteboard.general.changeCount — an integer that
                        increments on every change. No focus gating, no protocol
@@ -28,10 +28,13 @@ contract is not accidental:
     Tray               NSStatusItem.
     LockWatcher        not needed; nothing blocks while the screen is locked.
 
-Two things macOS could do that GNOME 46 cannot: intercept a real Cmd+V via
-CGEventTap, and identify the paste target through
+Two things macOS could do that GNOME 46 cannot, neither implemented yet:
+intercept a real Cmd+V via CGEventTap, and identify the paste target through
 NSWorkspace.frontmostApplication.bundleIdentifier — which is what per-application
 policy needs and what org.gnome.Shell.Introspect refuses to tell us.
+
+The Linux backend is verified on real hardware; the macOS one is not. See the
+warning at the top of `.darwin`.
 
 These are Protocols rather than base classes on purpose: an implementation only
 has to have the right shape, so a backend can be a thin adapter over whatever the
@@ -235,14 +238,9 @@ def get_backend(name: str | None = None) -> Backend:
         return LinuxBackend()
 
     if chosen == "darwin":
-        raise NotImplementedError(
-            "SafePaste has no macOS backend yet. One needs a safepaste.backend."
-            "darwin module providing ClipboardMonitor (NSPasteboard.changeCount), "
-            "ClipboardWriter (NSPasteboard), and optionally HotkeyBinder "
-            "(RegisterEventHotKey), Injector (CGEventPost) and Tray "
-            "(NSStatusItem). The detector, redactor and config layers need no "
-            "changes. See safepaste/backend/__init__.py for the contract."
-        )
+        from .darwin import DarwinBackend
+
+        return DarwinBackend()
 
     raise NotImplementedError(
         f"no SafePaste backend for platform {chosen!r}; "

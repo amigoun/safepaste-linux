@@ -249,6 +249,62 @@ editing the vendored copy. Two SafePaste-only keys are honoured:
 - `default_off = true` — ships inactive but switchable, for anything too noisy to
   have on by default. This is how the high-entropy detector stays opt-in.
 
+## macOS
+
+**Unverified on real hardware.** The macOS backend was written on Linux, with no
+Mac, no PyObjC and no toolchain to hand. Its logic — change-count polling,
+own-write suppression, UTI handling, multi-representation writes — is covered by 29
+tests against a fake pasteboard, and the portable detector and policy layers are the
+same code Linux runs. But not one actual AppKit call has ever executed. Treat first
+run as the real test.
+
+```sh
+python3 -m pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz regex
+python3 -m safepaste rules --stats        # portable core: should just work
+python3 -m safepaste.backend.darwin       # self-check against the real pasteboard
+python3 -m safepaste.service -v           # the polling service
+```
+
+The self-check saves and restores your clipboard and prints lengths, never content.
+
+### What works, and what is not built yet
+
+| | macOS | Linux |
+|---|---|---|
+| Clipboard monitoring | `NSPasteboard.changeCount` polling | XFIXES via XWayland |
+| Redaction | ✓ | ✓ |
+| **Rich formatting preserved** | ✓ multi-representation writes | ✗ `wl-copy` is one MIME type per call |
+| Notifications | `osascript` | GNOME notifications |
+| Keystroke injection | `CGEventPost` (needs Accessibility) | RemoteDesktop portal |
+| Tray icon | not built | ✓ StatusNotifierItem |
+| Global hotkey | not built | ✓ `Ctrl+Alt+V` |
+| Real paste interception | **possible** via `CGEventTap` | impossible on Wayland |
+| **Per-app policy** | **possible** via `NSWorkspace` | impossible without a Shell extension |
+
+macOS is a friendlier target than Wayland, and the Linux backend's size is
+misleading about the difficulty: 877 of its lines hand-roll StatusNotifierItem only
+because AppIndicator would drag GTK3 into a GTK4 process, and 330 implement a portal
+handshake only because Wayland forbids synthetic input. Neither problem exists here.
+
+Two things macOS could do that GNOME 46 cannot, and which are the most valuable
+things to build next:
+
+- **Real `Cmd+V` interception** via `CGEventTap`. Note the system *disables* a tap
+  that responds too slowly, so a Python tap on every keystroke is a poor bet — this
+  belongs in native code.
+- **Per-application policy** — "always redact into a browser, never into 1Password"
+  — via `NSWorkspace.frontmostApplication.bundleIdentifier`. This is precisely what
+  `org.gnome.Shell.Introspect` refuses to tell us on GNOME, so macOS gets for free
+  the feature Linux needs a Shell extension for.
+
+The tray and hotkey are absent rather than stubbed: `Backend` returns `None` for any
+capability a platform lacks, and the portable layers degrade instead of failing. A
+macOS user gets monitoring, redaction and notifications, and reaches the on-demand
+path through `safepaste redact`.
+
+Configuration lives in `~/Library/Application Support/SafePaste/` (or
+`$XDG_CONFIG_HOME` if you set it).
+
 ## Development
 
 ```sh

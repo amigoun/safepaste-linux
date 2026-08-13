@@ -56,15 +56,16 @@ def test_linux_backend_is_selected_on_linux() -> None:
     assert isinstance(backend, Backend)
 
 
-def test_macos_fails_with_a_message_naming_what_is_missing() -> None:
-    """An unimplemented platform must not look like a broken install."""
-    with pytest.raises(NotImplementedError) as excinfo:
-        get_backend("darwin")
-    message = str(excinfo.value)
-    assert "macOS" in message
-    # Names the concrete APIs a port needs, so the error is a starting point.
-    for expected in ("NSPasteboard", "backend.darwin", "detector"):
-        assert expected in message
+def test_macos_resolves_to_the_darwin_backend() -> None:
+    """Selectable from any platform: importing it must not require PyObjC.
+
+    Only the accessors touch AppKit, so a Linux machine can route to, construct
+    and inspect the macOS backend — which is what makes tests/test_darwin.py
+    possible at all.
+    """
+    backend = get_backend("darwin")
+    assert backend.name == "darwin"
+    assert isinstance(backend, Backend)
 
 
 def test_unknown_platform_points_at_the_contract() -> None:

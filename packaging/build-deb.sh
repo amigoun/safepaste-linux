@@ -61,7 +61,7 @@ EOF
     chmod 0755 "$PKGDIR/usr/bin/$1"
 }
 write_shim safepaste        safepaste.cli
-write_shim safepaste-daemon safepaste.daemon
+write_shim safepaste-daemon safepaste.service
 write_shim safepaste-gui    safepaste.app
 
 # --- packaging metadata ---------------------------------------------------
