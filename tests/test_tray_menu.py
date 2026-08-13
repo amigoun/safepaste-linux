@@ -126,3 +126,90 @@ def test_alert_state_does_not_break_the_structure(tray: TrayIndicator) -> None:
     root = tray._build_tree()
     assert root["props"].get("children-display") == "submenu"
     assert "2 secrets" in root["children"][0]["props"]["label"]
+
+
+# ---------------------------------------------------------------------------
+# The D-Bus wire shape.
+#
+# Two bugs here left the icon inert while every hand inspection looked correct,
+# so both are pinned. GNOME logged 34,962 errors in one session over the first
+# of them, retrying the layout update in a loop.
+# ---------------------------------------------------------------------------
+
+
+def test_menu_children_are_not_double_wrapped_variants(tray: TrayIndicator) -> None:
+    r"""A child of "av" must be the struct itself, not a variant holding it.
+
+    "av" already means "array of variants", so wrapping each child in an explicit
+    GLib.Variant("v", ...) produces a variant inside a variant. gdbus prints the
+    difference as `<<(1, ...)>>` versus `<(1, ...)>` — trivial to read past.
+
+    GNOME's appindicator extension does `children.map(c => c.deep_unpack())` then
+    `childrenUnpacked.map(([c]) => c)`. Against a double-wrapped child that
+    destructuring raises `TypeError: (destructured parameter) is not iterable`,
+    the layout update aborts, and the menu never appears — while GetLayout,
+    GetGroupProperties and every property still answer correctly by hand.
+    """
+    from gi.repository import GLib
+
+    _id, _props, children = tray._node_tuple(tray._build_tree(), [], -1)
+    assert children, "the root must have children to check"
+
+    for child in children:
+        assert isinstance(child, GLib.Variant)
+        assert child.get_type_string() == "(ia{sv}av)", (
+            f"child variant is {child.get_type_string()!r}; a bare 'v' here means "
+            "it was wrapped twice and GNOME will refuse the whole layout"
+        )
+
+
+def test_nested_submenu_children_are_also_single_wrapped(tray: TrayIndicator) -> None:
+    """The Protection submenu is a level deeper, so it exercises the recursion."""
+    _id, _props, children = tray._node_tuple(tray._build_tree(), [], -1)
+    nested = [c for c in children if c.get_child_value(2).n_children() > 0]
+    assert nested, "expected at least one child with children of its own"
+    for parent in nested:
+        grandchildren = parent.get_child_value(2)
+        for index in range(grandchildren.n_children()):
+            grandchild = grandchildren.get_child_value(index)
+            # Unwrap the implicit 'v' of the av slot; what is inside must be the
+            # struct, not another variant.
+            inner = grandchild.get_variant()
+            assert inner.get_type_string() == "(ia{sv}av)", (
+                f"nested child unwraps to {inner.get_type_string()!r}, i.e. it was "
+                "wrapped twice"
+            )
+
+
+def test_window_id_is_int32_as_the_spec_requires(tray: TrayIndicator) -> None:
+    """StatusNotifierItem declares WindowId as int32.
+
+    Declaring "u" makes GNOME log `Received property WindowId with type u does
+    not match expected type i in the expected interface` and discard it.
+    """
+    from safepaste.ui.tray import SNI_INTROSPECTION
+
+    assert '<property name="WindowId" type="i" access="read"/>' in SNI_INTROSPECTION
+    value = tray._handle_sni_get_property(None, None, None, None, "WindowId")
+    assert value is not None
+    assert value.get_type_string() == "i"
+
+
+def test_the_declared_interface_and_the_getters_agree(tray: TrayIndicator) -> None:
+    """Every declared property must be answerable, with the declared type.
+
+    A mismatch is only visible in GNOME's journal, never as an exception here,
+    which is exactly how the WindowId bug survived.
+    """
+    from gi.repository import Gio
+
+    from safepaste.ui.tray import SNI_INTROSPECTION
+
+    iface = Gio.DBusNodeInfo.new_for_xml(SNI_INTROSPECTION).interfaces[0]
+    for prop in iface.properties:
+        value = tray._handle_sni_get_property(None, None, None, None, prop.name)
+        assert value is not None, f"{prop.name} is declared but has no getter"
+        assert value.get_type_string() == prop.signature, (
+            f"{prop.name} is declared {prop.signature!r} but the getter returns "
+            f"{value.get_type_string()!r}"
+        )

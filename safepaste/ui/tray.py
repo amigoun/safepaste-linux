@@ -77,7 +77,7 @@ SNI_INTROSPECTION = f"""
     <property name="Id" type="s" access="read"/>
     <property name="Title" type="s" access="read"/>
     <property name="Status" type="s" access="read"/>
-    <property name="WindowId" type="u" access="read"/>
+    <property name="WindowId" type="i" access="read"/>
     <property name="IconThemePath" type="s" access="read"/>
     <property name="IconName" type="s" access="read"/>
     <property name="OverlayIconName" type="s" access="read"/>
@@ -579,7 +579,8 @@ class TrayIndicator:
             "Id": lambda: GLib.Variant("s", "safepaste"),
             "Title": lambda: GLib.Variant("s", "SafePaste"),
             "Status": lambda: GLib.Variant("s", self._status()),
-            "WindowId": lambda: GLib.Variant("u", 0),
+            # int32 per the StatusNotifierItem spec; "u" makes GNOME reject it.
+            "WindowId": lambda: GLib.Variant("i", 0),
             "IconThemePath": lambda: GLib.Variant("s", ""),
             "IconName": lambda: GLib.Variant("s", self._icon_name()),
             "OverlayIconName": lambda: GLib.Variant("s", ""),
@@ -747,13 +748,19 @@ class TrayIndicator:
     ) -> tuple[int, dict[str, GLib.Variant], list[GLib.Variant]]:
         """Build the (id, properties, children) tuple GetLayout needs.
 
-        `children` must be a list of GLib.Variant("v", ...) -- each wrapping
-        a full (ia{sv}av) struct -- because "av" is an array of variants, and
-        a variant value can only be supplied pre-built; every other level
-        here is passed as plain dict/list/tuple in one top-level
-        GLib.Variant(...) call, which is the only combination PyGObject's
-        recursive Variant builder accepts (verified empirically: handing it
-        an already-built Variant at a *non*-"v" position raises TypeError).
+        Each child goes into the "av" array as a plain (ia{sv}av) Variant, NOT
+        wrapped in GLib.Variant("v", ...). The "av" position already means "array
+        of variants", so an explicit v wrapper produces a variant inside a
+        variant. gdbus renders the difference as `<<(1, ...)>>` against the
+        correct `<(1, ...)>`, which is easy to read straight past.
+
+        It broke the menu completely and silently. GNOME's appindicator extension
+        does `children.map(c => c.deep_unpack())` and then
+        `childrenUnpacked.map(([c]) => c)`; against a double-wrapped child the
+        destructuring throws `TypeError: (destructured parameter) is not
+        iterable`, the layout update aborts, and the icon is left with no menu —
+        while GetLayout, GetGroupProperties and every property still answer
+        perfectly when inspected by hand.
         """
         props = self._wrap_props(node["props"], names)
         if depth == 0:
@@ -761,7 +768,7 @@ class TrayIndicator:
         else:
             next_depth = depth if depth < 0 else depth - 1
             children = [
-                GLib.Variant("v", GLib.Variant("(ia{sv}av)", self._node_tuple(child, names, next_depth)))
+                GLib.Variant("(ia{sv}av)", self._node_tuple(child, names, next_depth))
                 for child in node["children"]
             ]
         return (node["id"], props, children)
