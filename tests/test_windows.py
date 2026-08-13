@@ -359,11 +359,31 @@ def test_windows_products_satisfy_the_contract(api: FakeWin32Clipboard) -> None:
 
 
 def test_get_backend_routes_win32_without_needing_windows() -> None:
+    """Routing must work from any platform; capabilities depend on the platform.
+
+    A note to my future self, because this test has now broken twice for the same
+    reason: assert what is *true of the platform*, never what happens to be
+    implemented today. `tray() is None` was correct until the tray existed, and then
+    it failed on the one machine where the feature actually worked — which is the
+    opposite of what a test should do.
+    """
+    import sys
+
     backend = get_backend("win32")
     assert backend.name == "windows"
-    assert backend.hotkey_binder() is None  # RegisterHotKey needs a message pump
-    assert backend.tray() is None  # Shell_NotifyIcon needs a window
-    assert backend.lock_watcher() is None  # the Win32 clipboard does not block
+    # Permanently true: the Win32 clipboard does not block on a locked session the
+    # way wl-clipboard does, so there is nothing to watch.
+    assert backend.lock_watcher() is None
+
+    if sys.platform == "win32":
+        # A real desktop session: a message window can be created, so both of these
+        # are available. Either may still be None on a session with no desktop.
+        assert backend.tray() is not None or backend.message_window() is None
+    else:
+        # No user32 at all, so no window and therefore neither capability.
+        assert backend.message_window() is None
+        assert backend.tray() is None
+        assert backend.hotkey_binder(on_pressed=lambda: None) is None
 
 
 def test_windows_config_lives_under_appdata() -> None:
