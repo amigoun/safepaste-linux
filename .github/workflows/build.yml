@@ -121,6 +121,12 @@ jobs:
               "safepaste.detector", "safepaste.redactor", "safepaste.config",
               "safepaste.clipboard.monitor", "safepaste.clipboard.writer",
               "safepaste.ui.dialog", "safepaste.ui.prefs", "safepaste.ui.tray",
+              # The platform seam, the portable policy, and both shells.
+              "safepaste.backend", "safepaste.backend.linux", "safepaste.guard",
+              "safepaste.service", "safepaste.shell",
+              # Importable on Linux precisely because it defers AppKit; if this
+              # ever fails here, the macOS backend has grown an eager import.
+              "safepaste.backend.darwin",
           ]
           for m in mods:
               importlib.import_module(m)
