@@ -523,3 +523,122 @@ def test_hotkey_binder_is_not_created_without_a_callback() -> None:
     """A registered hotkey with nowhere to deliver would be worse than none."""
     backend = WindowsBackend(api=FakeWin32Clipboard("x"), sleep=_nosleep)
     assert backend.hotkey_binder(on_pressed=None) is None
+
+
+# ---------------------------------------------------------------------------
+# The tray menu, as data.
+#
+# Shell_NotifyIcon and TrackPopupMenu need Windows; the menu's structure does not,
+# and it is the part that has to stay consistent with the Linux tray so the product
+# feels like one thing.
+# ---------------------------------------------------------------------------
+
+
+def _tray():
+    from safepaste.backend.win32_loop import MessageWindow, Tray
+
+    return Tray(MessageWindow())
+
+
+def test_the_tray_menu_matches_the_linux_one() -> None:
+    tray = _tray()
+    labels = [label for _kind, label, _attrs in tray.build_menu_items() if label]
+    for expected in (
+        "Sanitise clipboard now",
+        "Redact automatically",
+        "Pause 15 minutes",
+        "Pause 1 hour",
+        "Preferences…",
+        "Quit",
+    ):
+        assert expected in labels, f"{expected!r} missing from the Windows tray menu"
+
+
+def test_exactly_one_mode_is_checked() -> None:
+    from safepaste.config import MODES
+
+    tray = _tray()
+    for mode in MODES:
+        tray.set_state(mode, False)
+        modes = [a for k, _l, a in tray.build_menu_items() if k == "mode"]
+        assert len(modes) == len(MODES)
+        checked = [a for a in modes if a.get("checked")]
+        assert len(checked) == 1 and checked[0]["mode"] == mode
+
+
+def test_resume_appears_only_while_paused() -> None:
+    tray = _tray()
+    tray.set_state("redact", False)
+    assert "Resume protection" not in [lbl for _k, lbl, _a in tray.build_menu_items()]
+    tray.set_state("redact", True)
+    assert "Resume protection" in [lbl for _k, lbl, _a in tray.build_menu_items()]
+
+
+def test_the_status_line_is_never_clickable() -> None:
+    tray = _tray()
+    kind, label, attrs = tray.build_menu_items()[0]
+    assert kind == "status" and label and attrs["enabled"] is False
+
+
+def test_the_status_line_does_not_claim_removal_in_other_modes() -> None:
+    """Same honesty rule as the Linux tray: only redact mode removes anything."""
+    tray = _tray()
+    tray.set_state("redact", False)
+    tray.set_alert(2)
+    assert "removed" in tray.build_menu_items()[0][1]
+
+    tray.set_state("notify", False)
+    tray.set_alert(2)
+    status = tray.build_menu_items()[0][1]
+    assert "found" in status and "removed" not in status
+
+
+def test_the_tooltip_and_icon_follow_state() -> None:
+    from safepaste.backend.win32_loop import IDI_INFORMATION, IDI_SHIELD, IDI_WARNING
+
+    tray = _tray()
+    tray.set_state("redact", False)
+    assert tray._icon_id() == IDI_SHIELD and "protected" in tray._tooltip().lower()
+
+    tray.set_state("redact", True)
+    assert tray._icon_id() == IDI_INFORMATION and "paused" in tray._tooltip().lower()
+
+    tray.set_state("off", False)
+    assert tray._icon_id() == IDI_INFORMATION and "off" in tray._tooltip().lower()
+
+    tray.set_state("redact", False)
+    tray.set_alert(3)
+    assert tray._icon_id() == IDI_WARNING and "3 secrets" in tray._tooltip()
+    tray.clear_alert()
+    assert tray._icon_id() == IDI_SHIELD
+
+
+def test_menu_actions_resolve_to_the_right_callbacks() -> None:
+    from safepaste.backend.win32_loop import MessageWindow, Tray
+
+    calls: list[tuple] = []
+    tray = Tray(
+        MessageWindow(),
+        on_mode=lambda m: calls.append(("mode", m)),
+        on_pause=lambda s: calls.append(("pause", s)),
+        on_resume=lambda: calls.append(("resume",)),
+        on_safe_paste=lambda: calls.append(("safe_paste",)),
+        on_preferences=lambda: calls.append(("preferences",)),
+        on_quit=lambda: calls.append(("quit",)),
+    )
+    tray.set_state("redact", True)  # so Resume is present
+    for kind, _label, attrs in tray.build_menu_items():
+        if kind in ("mode", "action"):
+            tray._resolve(kind, attrs)()
+    assert ("mode", "redact") in calls
+    assert ("pause", 900) in calls and ("pause", 3600) in calls
+    assert ("resume",) in calls and ("safe_paste",) in calls
+    assert ("preferences",) in calls and ("quit",) in calls
+
+
+def test_missing_callbacks_do_not_crash_the_menu() -> None:
+    """A tray built with no callbacks must still be clickable without raising."""
+    tray = _tray()
+    for kind, _label, attrs in tray.build_menu_items():
+        if kind in ("mode", "action"):
+            tray._resolve(kind, attrs)()  # must be a harmless no-op

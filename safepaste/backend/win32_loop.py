@@ -475,3 +475,301 @@ class ClipboardListener:
     @property
     def listening(self) -> bool:
         return self._listening
+
+
+# --- tray ------------------------------------------------------------------
+
+NIM_ADD = 0x00000000
+NIM_MODIFY = 0x00000001
+NIM_DELETE = 0x00000002
+NIF_MESSAGE = 0x00000001
+NIF_ICON = 0x00000002
+NIF_TIP = 0x00000004
+NIF_INFO = 0x00000010
+
+# Mouse messages arrive as the lParam of our WM_TRAY_CALLBACK.
+WM_LBUTTONUP = 0x0202
+WM_RBUTTONUP = 0x0205
+
+# Stock icons, so nothing has to be shipped or found on disk.
+IDI_SHIELD = 32518
+IDI_WARNING = 32515
+IDI_INFORMATION = 32516
+
+MF_STRING = 0x0000
+MF_SEPARATOR = 0x0800
+MF_GRAYED = 0x0001
+MF_CHECKED = 0x0008
+TPM_RIGHTALIGN = 0x0008
+TPM_RETURNCMD = 0x0100
+TPM_NONOTIFY = 0x0080
+
+
+class Tray:
+    """A notification-area icon, via Shell_NotifyIcon.
+
+    Satisfies the same Tray protocol as the Linux StatusNotifierItem, so the shell
+    treats them identically — but the mechanics are entirely different. Here the
+    icon is bound to a window and reports clicks as a window message, and the menu
+    is built on demand with TrackPopupMenu rather than exported over a bus. That is
+    why 877 lines of hand-rolled dbusmenu on Linux is about a hundred here.
+
+    Stock system icons are used deliberately (IDI_SHIELD and friends): shipping an
+    .ico would mean a resource to locate at runtime, and a PyInstaller bundle makes
+    that needlessly awkward.
+    """
+
+    def __init__(
+        self,
+        window: MessageWindow,
+        *,
+        on_mode: Callable[[str], None] | None = None,
+        on_pause: Callable[[int], None] | None = None,
+        on_resume: Callable[[], None] | None = None,
+        on_safe_paste: Callable[[], None] | None = None,
+        on_preferences: Callable[[], None] | None = None,
+        on_quit: Callable[[], None] | None = None,
+    ) -> None:
+        self._window = window
+        self._callbacks = {
+            "mode": on_mode, "pause": on_pause, "resume": on_resume,
+            "safe_paste": on_safe_paste, "preferences": on_preferences,
+            "quit": on_quit,
+        }
+        self._added = False
+        self._mode = "redact"
+        self._paused = False
+        self._alert: int | None = None
+        self._nid: Any = None
+        self._shell32: Any = None
+        # Command ids for the popup menu, resolved back to actions on click.
+        self._commands: dict[int, Callable[[], None]] = {}
+        window.on_message(WM_TRAY_CALLBACK, self._on_click)
+
+    # -- state -------------------------------------------------------------
+
+    def set_state(self, mode: str, paused: bool) -> None:
+        self._mode, self._paused, self._alert = mode, paused, None
+        self._refresh()
+
+    def set_alert(self, secrets: int) -> None:
+        self._alert = secrets
+        self._refresh()
+
+    def clear_alert(self) -> None:
+        self._alert = None
+        self._refresh()
+
+    def _icon_id(self) -> int:
+        if self._alert is not None:
+            return IDI_WARNING
+        if self._paused or self._mode == "off":
+            return IDI_INFORMATION
+        return IDI_SHIELD
+
+    def _tooltip(self) -> str:
+        if self._alert is not None:
+            noun = "secret" if self._alert == 1 else "secrets"
+            verb = "removed from" if self._mode == "redact" else "still on"
+            return f"SafePaste — {self._alert} {noun} {verb} the clipboard"
+        if self._paused:
+            return "SafePaste — paused"
+        if self._mode == "off":
+            return "SafePaste — protection off"
+        return "SafePaste — protected"
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self) -> bool:
+        if self._window.hwnd is None:
+            log.info("no window, so no tray icon")
+            return False
+        import ctypes
+        from ctypes import wintypes
+
+        user32, shell32 = self._window._user32, ctypes.WinDLL("shell32", use_last_error=True)
+        self._shell32 = shell32
+
+        class NOTIFYICONDATAW(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("hWnd", wintypes.HWND),
+                ("uID", wintypes.UINT),
+                ("uFlags", wintypes.UINT),
+                ("uCallbackMessage", wintypes.UINT),
+                ("hIcon", wintypes.HICON),
+                ("szTip", wintypes.WCHAR * 128),
+                ("dwState", wintypes.DWORD),
+                ("dwStateMask", wintypes.DWORD),
+                ("szInfo", wintypes.WCHAR * 256),
+                ("uVersion", wintypes.UINT),
+                ("szInfoTitle", wintypes.WCHAR * 64),
+                ("dwInfoFlags", wintypes.DWORD),
+                ("guidItem", wintypes.BYTE * 16),
+                ("hBalloonIcon", wintypes.HICON),
+            ]
+
+        shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+        shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+        user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
+        user32.LoadIconW.restype = wintypes.HICON
+        user32.CreatePopupMenu.argtypes = []
+        user32.CreatePopupMenu.restype = wintypes.HMENU
+        user32.AppendMenuW.argtypes = [
+            wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR
+        ]
+        user32.AppendMenuW.restype = wintypes.BOOL
+        user32.DestroyMenu.argtypes = [wintypes.HMENU]
+        user32.DestroyMenu.restype = wintypes.BOOL
+        user32.TrackPopupMenu.argtypes = [
+            wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, wintypes.HWND, ctypes.c_void_p,
+        ]
+        user32.TrackPopupMenu.restype = wintypes.BOOL
+        user32.GetCursorPos.argtypes = [ctypes.c_void_p]
+        user32.GetCursorPos.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+
+        self._NOTIFYICONDATAW = NOTIFYICONDATAW
+        self._ctypes = ctypes
+
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        nid.hWnd = self._window.hwnd
+        nid.uID = 1
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+        nid.uCallbackMessage = WM_TRAY_CALLBACK
+        # LoadIconW takes a resource *id* cast to a string pointer for stock icons.
+        nid.hIcon = user32.LoadIconW(None, ctypes.c_wchar_p(self._icon_id()))
+        nid.szTip = self._tooltip()
+        self._nid = nid
+
+        if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
+            log.warning(
+                "Shell_NotifyIcon(NIM_ADD) failed (error %d); no tray icon. This is "
+                "expected in a session with no Explorer shell, such as a CI runner.",
+                ctypes.get_last_error(),
+            )
+            return False
+        self._added = True
+        log.info("tray icon added")
+        return True
+
+    def _refresh(self) -> None:
+        if not self._added or self._nid is None:
+            return
+        self._nid.hIcon = self._window._user32.LoadIconW(
+            None, self._ctypes.c_wchar_p(self._icon_id())
+        )
+        self._nid.szTip = self._tooltip()
+        self._shell32.Shell_NotifyIconW(NIM_MODIFY, self._ctypes.byref(self._nid))
+
+    def stop(self) -> None:
+        if self._added and self._nid is not None:
+            self._shell32.Shell_NotifyIconW(NIM_DELETE, self._ctypes.byref(self._nid))
+            self._added = False
+
+    # -- the menu ----------------------------------------------------------
+
+    def _on_click(self, _wparam: int, lparam: int) -> None:
+        # Either button opens the menu: a background service has no primary action
+        # worth binding to left-click, and hiding the menu behind right-click only
+        # is a common complaint about tray applications.
+        if lparam in (WM_LBUTTONUP, WM_RBUTTONUP):
+            self._show_menu()
+
+    def build_menu_items(self) -> list[tuple[str, str, dict]]:
+        """The menu as data: (kind, label, attrs). Pure, so it can be tested.
+
+        Mirrors the Linux tray's structure deliberately -- same actions, same order,
+        same wording -- so the product feels like one thing across platforms.
+        """
+        from ..config import MODES
+
+        status = (
+            f"{self._alert} secret{'s' if self._alert != 1 else ''} "
+            f"{'removed' if self._mode == 'redact' else 'found'}"
+            if self._alert is not None
+            else "Paused" if self._paused
+            else "Protection off" if self._mode == "off"
+            else "Protected"
+        )
+        labels = {
+            "redact": "Redact automatically", "ask": "Ask every time",
+            "notify": "Notify only", "off": "Off",
+        }
+        items: list[tuple[str, str, dict]] = [
+            ("status", status, {"enabled": False}),
+            ("separator", "", {}),
+            ("action", "Sanitise clipboard now", {"action": "safe_paste"}),
+            ("separator", "", {}),
+        ]
+        for mode in MODES:
+            items.append(
+                ("mode", labels[mode], {"mode": mode, "checked": mode == self._mode})
+            )
+        items.append(("separator", "", {}))
+        items.append(("action", "Pause 15 minutes", {"action": "pause", "arg": 900}))
+        items.append(("action", "Pause 1 hour", {"action": "pause", "arg": 3600}))
+        if self._paused:
+            items.append(("action", "Resume protection", {"action": "resume"}))
+        items.append(("separator", "", {}))
+        items.append(("action", "Preferences…", {"action": "preferences"}))
+        items.append(("action", "Quit", {"action": "quit"}))
+        return items
+
+    def _show_menu(self) -> None:
+        if self._window.hwnd is None:
+            return
+        ctypes, user32 = self._ctypes, self._window._user32
+        menu = user32.CreatePopupMenu()
+        if not menu:
+            return
+        self._commands.clear()
+        next_id = 1000
+        try:
+            for kind, label, attrs in self.build_menu_items():
+                if kind == "separator":
+                    user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+                    continue
+                flags = MF_STRING
+                if attrs.get("enabled") is False:
+                    flags |= MF_GRAYED
+                if attrs.get("checked"):
+                    flags |= MF_CHECKED
+                next_id += 1
+                user32.AppendMenuW(menu, flags, next_id, label)
+                self._commands[next_id] = self._resolve(kind, attrs)
+
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+            point = POINT()
+            user32.GetCursorPos(ctypes.byref(point))
+            # Required by TrackPopupMenu, otherwise the menu will not dismiss when
+            # the user clicks elsewhere.
+            user32.SetForegroundWindow(self._window.hwnd)
+            chosen = user32.TrackPopupMenu(
+                menu, TPM_RIGHTALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+                point.x, point.y, 0, self._window.hwnd, None,
+            )
+            handler = self._commands.get(int(chosen))
+            if handler is not None:
+                handler()
+        finally:
+            user32.DestroyMenu(menu)
+
+    def _resolve(self, kind: str, attrs: dict) -> Callable[[], None]:
+        if kind == "mode":
+            mode = attrs["mode"]
+            callback = self._callbacks["mode"]
+            return (lambda: callback(mode)) if callback else (lambda: None)
+        action = attrs.get("action")
+        callback = self._callbacks.get(action or "")
+        if callback is None:
+            return lambda: None
+        if action == "pause":
+            seconds = attrs.get("arg", 900)
+            return lambda: callback(seconds)
+        return callback

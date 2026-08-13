@@ -607,6 +607,15 @@ class WindowsBackend(Backend):
         # No token concept: SendInput needs no grant to store.
         return WindowsInjector()
 
+    def tray(self, **callbacks: Callable) -> Any:
+        """Shell_NotifyIcon, which needs the same window as the hotkey."""
+        window = self.message_window()
+        if window is None:
+            return None
+        from .win32_loop import Tray
+
+        return Tray(window, **callbacks)
+
     def pump(self) -> bool:
         """Drain the message queue, if a window was ever created.
 

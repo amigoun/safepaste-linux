@@ -86,6 +86,7 @@ class PollingShell:
         self._stop = False
         self._hotkey = None
         self._listener = None
+        self._tray = None
 
         if not hasattr(self.guard.monitor, "poll_once"):
             raise TypeError(
@@ -102,6 +103,9 @@ class PollingShell:
         labels = ", ".join(result.labels[:3]) or "unknown"
         if len(result.labels) > 3:
             labels += f", and {len(result.labels) - 3} more"
+
+        if self._tray is not None:
+            self._tray.set_alert(secrets)
 
         if self.guard.config.mode == "redact":
             title = f"{secrets} {noun} removed from the clipboard"
@@ -138,6 +142,43 @@ class PollingShell:
         if listener_factory is not None:
             self._listener = listener_factory(self.guard.monitor)
 
+        tray = backend.tray(
+            on_mode=self._set_mode,
+            on_pause=lambda secs: self._set_paused(True, secs),
+            on_resume=lambda: self._set_paused(False, 0),
+            on_safe_paste=self.guard.safe_paste,
+            on_preferences=self._show_preferences,
+            on_quit=self.stop,
+        )
+        if tray is not None and tray.start():
+            self._tray = tray
+            tray.set_state(self.guard.config.mode, self.guard.paused)
+        elif tray is not None:
+            log.info("no tray icon on this session; everything else is unaffected")
+
+    def _set_mode(self, mode: str) -> None:
+        self.guard.set_mode(mode)
+        if self._tray is not None:
+            self._tray.set_state(self.guard.config.mode, self.guard.paused)
+
+    def _set_paused(self, paused: bool, seconds: int) -> None:
+        self.guard.set_paused(paused, seconds)
+        if self._tray is not None:
+            self._tray.set_state(self.guard.config.mode, self.guard.paused)
+
+    def _show_preferences(self) -> None:
+        """No settings window on these platforms yet.
+
+        Rather than a dead menu entry, say where the settings actually live. A GUI
+        would need a real toolkit, which is a larger decision than a tray icon.
+        """
+        from . import config as cfg
+
+        self.notify(
+            "SafePaste settings",
+            f"Edit {cfg.CONFIG_FILE} and the daemon will pick it up on restart.",
+        )
+
     def run(self) -> int:
         if not self.guard.start():
             return 1
@@ -166,6 +207,8 @@ class PollingShell:
                 self.timer.run_due()
                 time.sleep(self.interval)
         finally:
+            if self._tray is not None:
+                self._tray.stop()
             if self._listener is not None:
                 self._listener.stop()
             if self._hotkey is not None:

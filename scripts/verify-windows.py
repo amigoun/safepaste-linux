@@ -235,6 +235,30 @@ def main() -> int:
                 )
                 listener.stop()
 
+            # Shell_NotifyIcon: the one thing here that may legitimately fail on a
+            # CI runner, because a notification area needs an Explorer shell. A
+            # graceful False is the required behaviour either way.
+            from safepaste.backend.win32_loop import Tray
+
+            tray = Tray(window, on_quit=lambda: None)
+            added = tray.start()
+            check(
+                "tray start() returns a bool rather than raising",
+                isinstance(added, bool),
+                f"added={added} (False is acceptable: no Explorer shell on a runner)",
+            )
+            check(
+                "the tray menu is well-formed regardless",
+                len(tray.build_menu_items()) >= 10
+                and tray.build_menu_items()[0][2]["enabled"] is False,
+            )
+            if added:
+                tray.set_state("notify", False)
+                tray.set_alert(2)
+                tray.clear_alert()
+                check("state changes survive a real icon", True)
+                tray.stop()
+
         # --- injection ------------------------------------------------------
         # SendInput needs no permission, so this should genuinely succeed. It types
         # into whatever has focus, which on a CI runner is nothing.
