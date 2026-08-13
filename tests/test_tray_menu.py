@@ -31,9 +31,12 @@ def _can_build_widgets() -> bool:
        tray tests need, since they only touch Gio.
     2. The GTK4 and libadwaita *typelibs* present. Without them require_version
        raises ValueError: "Namespace Adw not available".
-    3. GTK actually *initialisable*, which needs a display. Constructing any widget
-       without one raises "Gtk couldn't be initialized" -- so a headless runner with
-       every package installed still cannot run these.
+    3. GTK actually able to build a widget, which needs a display.
+
+    Note the probe *constructs* something rather than asking Gtk.init_check(), which
+    is not trustworthy for this: with GDK_BACKEND set to nonsense it returns True
+    while Gtk.Window() still raises RuntimeError. Measured, not assumed. The only
+    honest way to know whether a widget can be built is to build one.
     """
     try:
         import gi
@@ -41,9 +44,11 @@ def _can_build_widgets() -> bool:
         gi.require_version("Gtk", "4.0")
         gi.require_version("Adw", "1")
         from gi.repository import Gtk
-    except (ImportError, ValueError):
+
+        Gtk.Window()
+    except (ImportError, ValueError, RuntimeError):
         return False
-    return bool(Gtk.init_check())
+    return True
 
 
 requires_display = pytest.mark.skipif(
