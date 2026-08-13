@@ -30,14 +30,20 @@ jobs:
           # python3-gi alone is not enough: the tray tests need only Gio, but the
           # dialog tests need the GTK4 and libadwaita typelibs. Without them those
           # two skip, and the transient-parent fix would go uncovered here.
+          # python3-gi alone is not enough. The tray tests need only Gio, but the
+          # dialog tests construct real widgets, which needs the GTK4 and libadwaita
+          # typelibs *and* a display -- hence xvfb below. Without all three they
+          # skip, and the transient-parent fix would go uncovered here.
           sudo apt-get install -y --no-install-recommends \
-            python3-regex python3-pytest python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
+            python3-regex python3-pytest python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 xvfb
 
       - name: Run the test suite
-        run: python3 -m pytest -q
+        # Under a virtual display so the dialog tests run rather than skip. Harmless
+        # for the rest of the suite, which never touches a widget.
+        run: xvfb-run -a python3 -m pytest -q -rs
 
       - name: Fail on any warning
-        run: python3 -m pytest -q -W error
+        run: xvfb-run -a python3 -m pytest -q -W error
 
       - name: Validate the vendored rule set offline
         # Checks the committed gitleaks.toml still matches its recorded digest and
