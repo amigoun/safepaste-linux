@@ -50,6 +50,14 @@ def validate(raw: bytes) -> dict:
     except ImportError:
         sys.exit("the `regex` module is required: apt install python3-regex")
 
+    # Validate through the same RE2->Python translation the runtime applies.
+    # Without this the check passes against a modern pip `regex` while the
+    # installed package silently drops rules on the distro's older one.
+    sys.path.insert(0, str(ROOT))
+    from safepaste.detector.rules import translate_re2
+
+    print(f"regex module version: {getattr(regex, '__version__', 'unknown')}")
+
     doc = tomllib.loads(raw.decode("utf-8"))
     rules = doc.get("rules") or []
     if not rules:
@@ -70,7 +78,7 @@ def validate(raw: bytes) -> dict:
             path_only.append(rid)
             continue
         try:
-            compiled = regex.compile(pattern)
+            compiled = regex.compile(translate_re2(pattern))
         except Exception as exc:  # noqa: BLE001 - reporting every failure at once
             failures.append(f"{rid}: {type(exc).__name__}: {exc}")
             continue

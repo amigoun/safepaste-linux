@@ -126,6 +126,40 @@ _ACRONYMS = {
 }
 
 
+def translate_re2(pattern: str) -> str:
+    r"""Rewrite Go RE2 syntax that Python's engines spell differently.
+
+    Currently one substitution: RE2's `\z` (end of text) becomes Python's `\Z`.
+    They are the same anchor; only the spelling differs, and Python has no `\z`
+    at all.
+
+    This is not cosmetic. Ubuntu 24.04 ships python3-regex 0.1.20221031, which
+    rejects `\z` outright, while a pip-installed modern `regex` accepts it. Four
+    upstream rules — curl-auth-header, curl-auth-user, openshift-user-token and
+    sentry-org-token — therefore failed to compile on the target distro while
+    working fine in a development venv. Because the loader skips uncompilable
+    rules with only a log warning, the installed package would have quietly run
+    four detectors short, and the test suite would still have passed. Hence also
+    `RuleSet.compile_failures`, which makes that condition loud.
+
+    The scan is escape-aware so a literal `\\z` (escaped backslash, then z) is
+    left alone. It does not track character classes; `\z` inside `[...]` is not an
+    anchor in either dialect, and no rule in the vendored set does that.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "\\" and i + 1 < len(pattern):
+            following = pattern[i + 1]
+            out.append("\\Z" if following == "z" else char + following)
+            i += 2
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
 def humanise(rule_id: str) -> str:
     """Turn a rule id into something fit for a dialog.
 
@@ -244,7 +278,12 @@ class Rule:
 class RuleSet:
     rules: list[Rule] = field(default_factory=list)
     global_allowlists: list[Allowlist] = field(default_factory=list)
+    # Rules dropped because they cannot apply to a clipboard at all (path-only).
+    # Expected, and not a problem.
     skipped: list[tuple[str, str]] = field(default_factory=list)
+    # Rules dropped because their regex would not compile here. Always a problem:
+    # it means a detector is missing on this machine but present on another.
+    compile_failures: list[tuple[str, str]] = field(default_factory=list)
 
     def enabled_for(self, categories: frozenset[str] | None) -> list[Rule]:
         """Active rules, given the categories the user has switched on.
@@ -276,7 +315,7 @@ def _compile_all(patterns: list[str]) -> list[regex.Pattern]:
     out = []
     for p in patterns:
         try:
-            out.append(regex.compile(p))
+            out.append(regex.compile(translate_re2(p)))
         except regex.error as exc:
             log.warning("skipping uncompilable allowlist pattern: %s", exc)
     return out
@@ -296,9 +335,11 @@ def _parse_rule(raw: dict[str, Any]) -> Rule | None:
         return None
 
     try:
-        pattern = regex.compile(pattern_src)
+        pattern = regex.compile(translate_re2(pattern_src))
     except regex.error as exc:
-        log.warning("rule %s has an uncompilable regex, skipping: %s", rid, exc)
+        # Recorded as a compile failure by the caller, not merely logged: a rule
+        # that silently vanishes is a detector the user thinks they have.
+        log.error("rule %s has an uncompilable regex, skipping: %s", rid, exc)
         return None
 
     allowlists: list[Allowlist] = []
@@ -342,8 +383,12 @@ def load_file(path: pathlib.Path, into: RuleSet) -> None:
     for raw in doc.get("rules") or []:
         rule = _parse_rule(raw)
         if rule is None:
-            if raw.get("id"):
-                into.skipped.append((raw["id"], "no usable regex"))
+            rid = raw.get("id")
+            if rid:
+                if raw.get("regex"):
+                    into.compile_failures.append((rid, "regex did not compile"))
+                else:
+                    into.skipped.append((rid, "no usable regex"))
             continue
         if rule.id in seen:
             # Later files win, so a user file can retune a vendored rule by id.
@@ -368,4 +413,15 @@ def load_default(extra_paths: list[pathlib.Path] | None = None) -> RuleSet:
         len(rs.skipped),
         len(rs.global_allowlists),
     )
+    if rs.compile_failures:
+        # Loud, because the effect is invisible otherwise: fewer detectors than
+        # the user believes they have, with no symptom until something leaks.
+        log.error(
+            "%d rule(s) failed to compile and are NOT active: %s. "
+            "This usually means the installed `regex` is older than the rule set "
+            "expects (regex %s in use).",
+            len(rs.compile_failures),
+            ", ".join(rid for rid, _ in rs.compile_failures),
+            getattr(regex, "__version__", "unknown"),
+        )
     return rs

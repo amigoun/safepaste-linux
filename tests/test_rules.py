@@ -14,6 +14,7 @@ from safepaste.detector.rules import (
     classify,
     humanise,
     load_default,
+    translate_re2,
 )
 
 # --- loaded ruleset shape --------------------------------------------------
@@ -224,3 +225,44 @@ def test_default_off_is_not_a_veto() -> None:
     assert "safepaste-high-entropy-string" in {
         r.id for r in ruleset.enabled_for(frozenset({"high_entropy"}))
     }
+
+
+# ---------------------------------------------------------------------------
+# Compile failures must be loud.
+#
+# The loader skips a rule whose regex will not compile. That is the right
+# runtime behaviour -- one bad user rule should not take the whole guard down --
+# but it means a missing detector has no symptom. Ubuntu 24.04's python3-regex
+# 0.1.20221031 rejects Go RE2's `\z`, which four upstream rules use, so the
+# shipped package ran four detectors short while every test still passed.
+# ---------------------------------------------------------------------------
+
+
+def test_no_rule_fails_to_compile(ruleset) -> None:
+    assert ruleset.compile_failures == [], (
+        "rule(s) failed to compile: "
+        + ", ".join(f"{rid} ({why})" for rid, why in ruleset.compile_failures)
+        + f" -- regex module version {getattr(regex, '__version__', 'unknown')}"
+    )
+
+
+def test_re2_end_of_text_anchor_is_translated() -> None:
+    r"""`\z` is RE2's end-of-text anchor; Python spells it `\Z` and has no `\z`."""
+    assert translate_re2(r"(?:\s|\z)") == r"(?:\s|\Z)"
+    assert translate_re2(r"\z") == r"\Z"
+    # An escaped backslash followed by a literal z must be left alone.
+    assert translate_re2(r"a\\z") == r"a\\z"
+    assert translate_re2(r"\Z") == r"\Z"
+    assert translate_re2("no anchor") == "no anchor"
+
+
+def test_rules_using_the_anchor_are_active(ruleset) -> None:
+    r"""The four upstream rules that use `\z` must actually be loaded."""
+    ids = {r.id for r in ruleset.rules}
+    for rule_id in (
+        "curl-auth-header",
+        "curl-auth-user",
+        "openshift-user-token",
+        "sentry-org-token",
+    ):
+        assert rule_id in ids, f"{rule_id} is missing; did the \\z translation break?"
