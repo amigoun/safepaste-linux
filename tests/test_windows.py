@@ -388,3 +388,46 @@ def test_the_whole_guard_pipeline_runs_on_the_windows_backend(tmp_path, monkeypa
     assert seen_after == [], "restoring is our own write, not a new copy"
 
     guard.stop()
+
+
+# ---------------------------------------------------------------------------
+# Wide-char sizing.
+#
+# Found on a windows-latest runner as "20 chars in, 19 out": the buffer was sized
+# from len(text), which counts code points, while UTF-16 counts code units. Any
+# astral character is a surrogate pair and needs two.
+# ---------------------------------------------------------------------------
+
+
+def test_utf16_size_counts_code_units_not_code_points() -> None:
+    from safepaste.backend.windows import utf16_size_with_nul
+
+    # ASCII and BMP: code points and code units coincide, so the naive formula
+    # happens to be right and the bug stays hidden.
+    assert utf16_size_with_nul("") == 2
+    assert utf16_size_with_nul("plain") == 12 == (len("plain") + 1) * 2
+    assert utf16_size_with_nul("naïve") == 12
+
+    # Astral characters do not. This is where the naive formula truncates.
+    for text in ("🔐", "a🔐b", "naïve — 日本語 — 🔐 tail"):
+        naive = (len(text) + 1) * 2
+        correct = utf16_size_with_nul(text)
+        assert correct > naive, f"{text!r} must need more than the naive size"
+        assert correct == len(text.encode("utf-16-le")) + 2
+
+
+def test_utf16_size_matches_what_ctypes_would_allocate() -> None:
+    """The value we pass to GlobalAlloc must equal the buffer ctypes builds.
+
+    create_unicode_buffer uses wchar_t, which is 2 bytes on Windows and 4 on Linux,
+    so only the 2-byte case can be asserted portably — but the *relationship* is
+    what matters and is checked with an assert in set_text at runtime.
+    """
+    import ctypes
+
+    from safepaste.backend.windows import utf16_size_with_nul
+
+    if ctypes.sizeof(ctypes.c_wchar) != 2:
+        pytest.skip("wchar_t is not UTF-16 here, so ctypes sizing cannot be compared")
+    for text in ("", "plain", "naïve", "a🔐b"):
+        assert utf16_size_with_nul(text) == ctypes.sizeof(ctypes.create_unicode_buffer(text))

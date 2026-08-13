@@ -70,6 +70,18 @@ OPEN_BACKOFF = 0.02  # doubles each attempt: ~5s worst case across 8 tries
 DEFAULT_POLL_INTERVAL = 0.3
 
 
+def utf16_size_with_nul(text: str) -> int:
+    r"""Bytes needed to hold `text` as UTF-16, including the terminating NUL.
+
+    `len(text) * 2` is wrong and fails only on real input. Python's len() counts
+    *code points*; UTF-16 counts *code units*, and any astral character — every
+    emoji, for one — is a surrogate pair occupying two units. Sizing the buffer by
+    len() therefore under-allocates, and the copy is silently truncated: caught on
+    a windows-latest runner as "20 chars in, 19 out".
+    """
+    return len(text.encode("utf-16-le")) + 2
+
+
 class Win32Clipboard(Protocol):
     """The slice of the Win32 clipboard API this backend uses.
 
@@ -163,8 +175,13 @@ class _CtypesClipboard:
 
     def set_text(self, text: str) -> bool:
         GMEM_MOVEABLE = 0x0002
-        # Wide chars, plus the terminating NUL that wstring_at will look for.
-        size = (len(text) + 1) * self._ctypes.sizeof(self._ctypes.c_wchar)
+        buffer = self._ctypes.create_unicode_buffer(text)
+        # Sized from the UTF-16 encoding, never from len(text) -- see
+        # utf16_size_with_nul. Cross-checked against what ctypes actually built.
+        size = utf16_size_with_nul(text)
+        assert size == self._ctypes.sizeof(buffer), (
+            f"size mismatch: computed {size}, buffer is {self._ctypes.sizeof(buffer)}"
+        )
         handle = self._kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
         if not handle:
             log.error("GlobalAlloc failed for %d bytes", size)
@@ -174,7 +191,6 @@ class _CtypesClipboard:
             self._kernel32.GlobalFree(handle)
             return False
         try:
-            buffer = self._ctypes.create_unicode_buffer(text)
             self._ctypes.memmove(pointer, buffer, size)
         finally:
             self._kernel32.GlobalUnlock(handle)
@@ -396,18 +412,48 @@ class WindowsInjector:
             KEYEVENTF_KEYUP = 0x0002
             INPUT_KEYBOARD = 1
 
+            # ULONG_PTR: pointer-width, so c_size_t rather than a fixed 32 bits.
+            ULONG_PTR = ctypes.c_size_t
+
+            class MOUSEINPUT(ctypes.Structure):
+                _fields_ = [
+                    ("dx", wintypes.LONG),
+                    ("dy", wintypes.LONG),
+                    ("mouseData", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ULONG_PTR),
+                ]
+
             class KEYBDINPUT(ctypes.Structure):
                 _fields_ = [
                     ("wVk", wintypes.WORD),
                     ("wScan", wintypes.WORD),
                     ("dwFlags", wintypes.DWORD),
                     ("time", wintypes.DWORD),
-                    ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+                    ("dwExtraInfo", ULONG_PTR),
+                ]
+
+            class HARDWAREINPUT(ctypes.Structure):
+                _fields_ = [
+                    ("uMsg", wintypes.DWORD),
+                    ("wParamL", wintypes.WORD),
+                    ("wParamH", wintypes.WORD),
                 ]
 
             class INPUT(ctypes.Structure):
+                # All three union members are declared even though only the
+                # keyboard one is used. SendInput validates cbSize against the
+                # real INPUT, and a union sized by KEYBDINPUT alone is too small:
+                # MOUSEINPUT is the largest member. Getting this wrong fails with
+                # ERROR_INVALID_PARAMETER (87) and zero events delivered -- caught
+                # on a windows-latest runner.
                 class _U(ctypes.Union):
-                    _fields_ = [("ki", KEYBDINPUT)]
+                    _fields_ = [
+                        ("mi", MOUSEINPUT),
+                        ("ki", KEYBDINPUT),
+                        ("hi", HARDWAREINPUT),
+                    ]
 
                 _anonymous_ = ("u",)
                 _fields_ = [("type", wintypes.DWORD), ("u", _U)]
@@ -415,7 +461,7 @@ class WindowsInjector:
             def event(vk: int, up: bool) -> INPUT:
                 item = INPUT()
                 item.type = INPUT_KEYBOARD
-                item.ki = KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, None)
+                item.ki = KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, 0)
                 return item
 
             # Press and release in strict order; a stuck Ctrl would be worse than a
