@@ -320,13 +320,29 @@ def test_contention_during_a_poll_is_survivable(api: FakeWin32Clipboard) -> None
 # --- injector -------------------------------------------------------------
 
 
-def test_injector_declines_without_win32_rather_than_raising() -> None:
-    """On Linux ctypes.WinDLL does not exist, which is the same path as any
-    SendInput failure: report False, never propagate."""
+def test_injector_reports_honestly_on_either_platform() -> None:
+    """Never raises, and never claims success it did not have.
+
+    Off Windows there is no ctypes.WinDLL, which is the same code path as any
+    SendInput failure: report False. On Windows SendInput needs no permission, so
+    it must genuinely succeed — and asserting that is what caught ERROR_INVALID_
+    PARAMETER (87) from an under-sized INPUT union. An earlier version of this test
+    only checked "returns a result without raising", which False satisfied, so the
+    bug slipped through until the CI log was read by eye.
+    """
+    import sys
+
     injector = WindowsInjector()
     results: list[bool] = []
     injector.paste(results.append)
-    assert results == [False]
+    assert len(results) == 1
+    if sys.platform == "win32":
+        assert results == [True], (
+            "SendInput needs no permission on Windows, so failure means the INPUT "
+            "struct is wrong -- check cbSize against the real union"
+        )
+    else:
+        assert results == [False]
     injector.close()
 
 
