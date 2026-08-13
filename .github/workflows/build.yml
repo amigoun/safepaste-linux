@@ -111,21 +111,33 @@ jobs:
           # Resource hashes are generated from PyPI, never typed; a stale one fails
           # the install at the download step with nothing useful to say.
           python3 scripts/sync-homebrew-resources.py --check
-          brew audit --formula --strict packaging/homebrew/safepaste.rb || \
-            brew audit --formula packaging/homebrew/safepaste.rb
+
+          # Through a real tap, because `brew audit <path>` is disabled in current
+          # Homebrew -- it takes a *name*. That is also closer to how someone would
+          # actually install this, so it is the better test anyway.
+          brew tap-new --no-git local/safepaste
+          cp packaging/homebrew/safepaste.rb \
+            "$(brew --repo local/safepaste)/Formula/safepaste.rb"
+
+          # Strict is advisory: it flags house style for the core tap, which a
+          # third-party formula need not satisfy. Plain audit is the gate.
+          brew audit --formula --strict local/safepaste/safepaste || \
+            echo "::notice::brew audit --strict raised advisory findings"
+          brew audit --formula local/safepaste/safepaste
 
       - name: Install from the formula and run its test block
         run: |
           set -eux
-          # HEAD, because the tagged tarball's sha256 is a placeholder until a
-          # release fills it in -- and this is the branch build, not a release.
-          brew install --HEAD --build-from-source packaging/homebrew/safepaste.rb
-          brew test --HEAD safepaste || brew test safepaste
-          # And independently of brew's own test block:
+          # --HEAD, because the tagged tarball's sha256 is a placeholder until a
+          # release fills it in, and this is a branch build.
+          brew install --HEAD --build-from-source local/safepaste/safepaste
+          brew test local/safepaste/safepaste
+          # Independently of brew's own test block, from the installed prefix:
           safepaste rules --stats
           printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
             | safepaste redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=\[REDACTED\]'
-          brew uninstall safepaste
+          test -x "$(brew --prefix)/bin/safepaste-daemon"
+          brew uninstall local/safepaste/safepaste
 
       - name: The CLI works with no desktop at all
         run: |
