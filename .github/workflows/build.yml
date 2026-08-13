@@ -301,6 +301,44 @@ jobs:
           path: dist/artifacts/*.zip
           if-no-files-found: error
 
+      - name: The Scoop manifest must actually install
+        # The macOS equivalent of this step found a formula that was correct and
+        # unreachable, so the Windows side gets the same treatment: install from the
+        # committed manifest and run what it puts on PATH.
+        #
+        # This installs the *released* archive the manifest points at, not the one
+        # built above -- which is the point. It checks the hash, the extract_dir and
+        # the bin array, none of which can be wrong in a way that shows up before an
+        # install is attempted.
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Scoop is not on the runner image, and its installer refuses to run as
+          # administrator unless told that is deliberate. Runners are administrators.
+          Invoke-Expression "& {$(Invoke-RestMethod get.scoop.sh)} -RunAsAdmin"
+
+          scoop install .\packaging\scoop\safepaste.json
+          if ($LASTEXITCODE -ne 0) { throw "scoop install failed" }
+
+          # By full path: the installer edits the user PATH, which this session has
+          # already read.
+          $shim = "$env:USERPROFILE\scoop\shims\safepaste.exe"
+          $stats = & $shim rules --stats
+          $stats | Select-Object -First 1
+          if ($stats -notmatch 'total rules: \d\d\d') {
+            throw "the installed build has no rules: $stats"
+          }
+          $out = "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z" | & $shim redact -
+          if ($out -notmatch [regex]::Escape("GITHUB_TOKEN=[REDACTED]")) {
+            throw "the installed build did not redact: $out"
+          }
+          if (-not (Test-Path "$env:USERPROFILE\scoop\shims\safepaste-daemon.exe")) {
+            throw "the manifest did not shim safepaste-daemon"
+          }
+          Write-Host "::notice::installed via Scoop: $(scoop list safepaste | Out-String)"
+          scoop uninstall safepaste
+
       - name: The CLI works with no desktop at all
         shell: bash
         run: |
