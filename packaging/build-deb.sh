@@ -7,7 +7,7 @@
 # Needs no root — --root-owner-group gets the ownership right without fakeroot.
 set -eu
 
-REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$REPO"
 
 # Single source of truth for the version: the package itself. Hardcoding it in
@@ -75,7 +75,9 @@ done
 
 cp packaging/systemd/safepaste.service "$PKGDIR/usr/lib/systemd/user/"
 cp packaging/safepaste.desktop "$PKGDIR/usr/share/applications/"
-[ -f README.md ] && cp README.md "$PKGDIR/usr/share/doc/safepaste/"
+if [ -f README.md ]; then
+    cp README.md "$PKGDIR/usr/share/doc/safepaste/"
+fi
 
 # Normalise permissions: files copied from a working tree carry whatever the
 # developer's umask happened to be (0664 here), which lintian flags. Sweep
@@ -85,7 +87,9 @@ find "$PKGDIR" -type d -exec chmod 0755 {} +
 find "$PKGDIR" -type f -exec chmod 0644 {} +
 chmod 0755 "$PKGDIR/usr/bin/"*
 for script in postinst prerm postrm; do
-    [ -f "$PKGDIR/DEBIAN/$script" ] && chmod 0755 "$PKGDIR/DEBIAN/$script"
+    if [ -f "$PKGDIR/DEBIAN/$script" ]; then
+        chmod 0755 "$PKGDIR/DEBIAN/$script"
+    fi
 done
 
 DEB="$OUT/safepaste_${VERSION}_all.deb"

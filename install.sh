@@ -6,7 +6,7 @@
 # case where you do not, or where you want to run straight from a checkout.
 set -eu
 
-REPO=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PREFIX="${PREFIX:-$HOME/.local}"
 LIBDIR="$PREFIX/lib/safepaste"
 BINDIR="$PREFIX/bin"
