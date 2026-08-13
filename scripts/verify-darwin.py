@@ -16,6 +16,7 @@ clipboard contents. Exits non-zero if any check fails, so CI can rely on it.
 
 from __future__ import annotations
 
+import logging
 import pathlib
 import sys
 import tempfile
@@ -39,6 +40,8 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="  %(levelname)s %(name)s: %(message)s")
+
     if sys.platform != "darwin":
         print(f"this check only means anything on macOS (running on {sys.platform})")
         return 77  # distinct from a failure: nothing was verified

@@ -17,6 +17,7 @@ so it cannot silently verify nothing.
 
 from __future__ import annotations
 
+import logging
 import pathlib
 import sys
 import tempfile
@@ -37,6 +38,10 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
 
 
 def main() -> int:
+    # Without this, log.error calls inside the backend go nowhere and a failure
+    # reports only that it failed. Cost me a CI round trip.
+    logging.basicConfig(level=logging.INFO, format="  %(levelname)s %(name)s: %(message)s")
+
     if sys.platform != "win32":
         print(f"this check only means anything on Windows (running on {sys.platform})")
         return 77

@@ -131,6 +131,7 @@ class MessageWindow:
         self._user32: Any = None
         self._wndproc_ref: Any = None  # must outlive the window
         self._atom: Any = None
+        self._MSG: Any = None
 
     # -- registration ------------------------------------------------------
 
@@ -149,9 +150,10 @@ class MessageWindow:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self._user32 = user32
 
+        LRESULT = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
+        UINT_PTR = ctypes.c_size_t
         WNDPROC = ctypes.WINFUNCTYPE(
-            ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long,
-            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+            LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
         )
 
         class WNDCLASS(ctypes.Structure):
@@ -168,10 +170,68 @@ class MessageWindow:
                 ("lpszClassName", wintypes.LPCWSTR),
             ]
 
+        class MSG(ctypes.Structure):
+            _fields_ = [
+                ("hwnd", wintypes.HWND),
+                ("message", wintypes.UINT),
+                ("wParam", wintypes.WPARAM),
+                ("lParam", wintypes.LPARAM),
+                ("time", wintypes.DWORD),
+                ("pt_x", ctypes.c_long),
+                ("pt_y", ctypes.c_long),
+            ]
+
+        self._MSG = MSG
+
+        # Every signature is declared, all sixteen of them. Omitting argtypes is not
+        # a shortcut: ctypes then guesses from the Python value and passes an int as
+        # a 32-bit C int, so HWND_MESSAGE (-3) reaches CreateWindowExW -- which wants
+        # a 64-bit HWND -- with garbage in the upper half. The window silently fails
+        # to create and nothing says why. Learned from a windows-latest run.
         user32.DefWindowProcW.argtypes = [
-            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
         ]
-        user32.DefWindowProcW.restype = ctypes.c_longlong
+        user32.DefWindowProcW.restype = LRESULT
+        user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASS)]
+        user32.RegisterClassW.restype = wintypes.ATOM
+        user32.CreateWindowExW.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, ctypes.c_void_p, wintypes.HINSTANCE, ctypes.c_void_p,
+        ]
+        user32.CreateWindowExW.restype = wintypes.HWND
+        user32.DestroyWindow.argtypes = [wintypes.HWND]
+        user32.DestroyWindow.restype = wintypes.BOOL
+        user32.SetTimer.argtypes = [wintypes.HWND, UINT_PTR, wintypes.UINT, ctypes.c_void_p]
+        user32.SetTimer.restype = UINT_PTR
+        user32.KillTimer.argtypes = [wintypes.HWND, UINT_PTR]
+        user32.KillTimer.restype = wintypes.BOOL
+        user32.PeekMessageW.argtypes = [
+            ctypes.POINTER(MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT
+        ]
+        user32.PeekMessageW.restype = wintypes.BOOL
+        user32.TranslateMessage.argtypes = [ctypes.POINTER(MSG)]
+        user32.TranslateMessage.restype = wintypes.BOOL
+        user32.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
+        user32.DispatchMessageW.restype = LRESULT
+        user32.PostQuitMessage.argtypes = [ctypes.c_int]
+        user32.PostQuitMessage.restype = None
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+        ]
+        user32.PostMessageW.restype = wintypes.BOOL
+        user32.RegisterHotKey.argtypes = [
+            wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT
+        ]
+        user32.RegisterHotKey.restype = wintypes.BOOL
+        user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.UnregisterHotKey.restype = wintypes.BOOL
+        user32.AddClipboardFormatListener.argtypes = [wintypes.HWND]
+        user32.AddClipboardFormatListener.restype = wintypes.BOOL
+        user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
+        user32.RemoveClipboardFormatListener.restype = wintypes.BOOL
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
         def dispatch(hwnd, message, wparam, lparam):  # noqa: ANN001, ANN202
             try:
@@ -210,7 +270,8 @@ class MessageWindow:
 
         self.hwnd = user32.CreateWindowExW(
             0, self.CLASS_NAME, self.CLASS_NAME, 0, 0, 0, 0, 0,
-            HWND_MESSAGE,  # never shown, never enumerated by the shell
+            # HWND_MESSAGE must be an actual pointer-width handle, not a Python int.
+            wintypes.HWND(HWND_MESSAGE),
             None, wndclass.hInstance, None,
         )
         if not self.hwnd:
@@ -245,27 +306,19 @@ class MessageWindow:
         """
         if self.hwnd is None:
             return False
-        import ctypes
-        from ctypes import wintypes
-
         PM_REMOVE = 0x0001
+        WM_QUIT = 0x0012
 
-        class MSG(ctypes.Structure):
-            _fields_ = [
-                ("hwnd", wintypes.HWND), ("message", wintypes.UINT),
-                ("wParam", wintypes.WPARAM), ("lParam", wintypes.LPARAM),
-                ("time", wintypes.DWORD), ("pt_x", ctypes.c_long),
-                ("pt_y", ctypes.c_long),
-            ]
-
-        message = MSG()
+        message = self._MSG()
         alive = True
-        while self._user32.PeekMessageW(ctypes.byref(message), None, 0, 0, PM_REMOVE):
-            if message.message == 0x0012:  # WM_QUIT
+        while self._user32.PeekMessageW(
+            self._ctypes.byref(message), None, 0, 0, PM_REMOVE
+        ):
+            if message.message == WM_QUIT:
                 alive = False
                 break
-            self._user32.TranslateMessage(ctypes.byref(message))
-            self._user32.DispatchMessageW(ctypes.byref(message))
+            self._user32.TranslateMessage(self._ctypes.byref(message))
+            self._user32.DispatchMessageW(self._ctypes.byref(message))
         return alive
 
     def run(self) -> None:
