@@ -660,7 +660,18 @@ class TrayIndicator:
 
         return {
             "id": self._ID_ROOT,
-            "props": {},
+            # `children-display: submenu` on the ROOT is load-bearing, and its
+            # absence fails in the most confusing way available: the icon appears,
+            # registration succeeds, GetLayout returns every item correctly -- and
+            # clicking the icon does nothing at all.
+            #
+            # A dbusmenu host decides whether an item has a menu worth opening by
+            # reading this property, not by noticing that the item has children.
+            # With it unset on the root, GNOME concludes there is nothing to show
+            # and swallows the click. Submenus further down need it for the same
+            # reason (see "Protection" below); the root is simply the one that is
+            # easy to forget, because it has no label to draw attention to it.
+            "props": {"children-display": "submenu"},
             "children": [
                 {
                     "id": self._ID_STATUS,
