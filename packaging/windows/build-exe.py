@@ -73,10 +73,17 @@ def check_data_present() -> None:
 
 
 def build(name: str, entry: str, *, windowed: bool, onedir: bool) -> pathlib.Path:
-    # The separator in --add-data is os.pathsep, so ';' on Windows and ':' elsewhere.
-    # Getting it wrong silently produces a bundle with no rules.
+    # Two things about --add-data, both of which fail by producing a bundle with no
+    # rules rather than by complaining:
+    #
+    # 1. The separator is os.pathsep: ';' on Windows, ':' elsewhere.
+    # 2. A *relative* source path is resolved against the --specpath directory, not
+    #    the working directory. Since the spec lives under build/, a relative
+    #    "safepaste/detector/data" is looked for at build/pyinstaller/safepaste/...
+    #    and is not there. Absolute source, relative destination.
     sep = ";" if sys.platform == "win32" else ":"
-    data_spec = f"safepaste{pathlib.os.sep}detector{pathlib.os.sep}data{sep}safepaste/detector/data"
+    source = REPO / "safepaste" / "detector" / "data"
+    data_spec = f"{source}{sep}safepaste/detector/data"
 
     argv = [
         sys.executable, "-m", "PyInstaller",
