@@ -290,13 +290,25 @@ def test_darwin_products_satisfy_the_contract(board: FakePasteboard) -> None:
 
 
 def test_get_backend_routes_darwin_without_needing_a_mac() -> None:
+    """Routing works anywhere; capabilities depend on the platform.
+
+    Deliberately conditioned rather than asserting None flatly: the same mistake
+    broke the Windows suite the moment its tray was implemented, and these two
+    would have broken here for exactly the same reason.
+    """
+    import sys
+
     backend = get_backend("darwin")
     assert backend.name == "darwin"
-    # Not implemented yet, and the contract says None rather than a broken stub.
-    assert backend.hotkey_binder() is None
-    assert backend.tray() is None
-    # No lock watcher is needed: NSPasteboard does not block on a locked screen.
+    # Permanently true: NSPasteboard does not block on a locked screen, so there is
+    # nothing for a lock watcher to do.
     assert backend.lock_watcher() is None
+
+    if sys.platform != "darwin":
+        # No AppKit, so no run loop, so neither capability can exist.
+        assert backend.run_loop() is None
+        assert backend.tray() is None
+        assert backend.hotkey_binder(on_pressed=lambda: None) is None
 
 
 def test_macos_config_lives_under_application_support() -> None:
@@ -460,3 +472,145 @@ def test_service_dispatches_by_platform(monkeypatch) -> None:
 
     monkeypatch.setattr(service.sys, "platform", "sunos5")
     assert service.main([]) == 2  # unknown platform, reported not crashed
+
+
+# ---------------------------------------------------------------------------
+# The macOS run loop, status item and hotkey.
+#
+# AppKit and Carbon are unreachable here, so what is tested is the data: the menu
+# structure (which must match the other two platforms) and accelerator translation
+# (which is where a config file meets three different key-code conventions).
+# ---------------------------------------------------------------------------
+
+
+def test_accelerator_translates_to_carbon_modifiers() -> None:
+    from safepaste.backend.darwin_loop import (
+        CARBON_CMD,
+        CARBON_CONTROL,
+        CARBON_OPTION,
+        CARBON_SHIFT,
+        parse_accelerator,
+    )
+
+    mods, key = parse_accelerator("<Control><Alt>v")
+    assert mods & CARBON_CONTROL and mods & CARBON_OPTION
+    # macOS key codes are positional: 'v' is 0x09 and bears no relation to the
+    # character, unlike Windows where the virtual-key code *is* the ASCII value.
+    assert key == 0x09
+
+    assert parse_accelerator("<Shift>a")[0] & CARBON_SHIFT
+    assert parse_accelerator("<Command>v")[0] & CARBON_CMD
+
+
+def test_primary_means_command_on_macos() -> None:
+    """<Primary> is GTK's "the platform's main modifier".
+
+    Ctrl on Linux and Windows, Command here -- so one config file gives each
+    platform the chord its users expect, rather than Ctrl+Alt+V on a Mac.
+    """
+    from safepaste.backend.darwin_loop import CARBON_CMD, CARBON_CONTROL, parse_accelerator
+
+    mods, _key = parse_accelerator("<Primary>v")
+    assert mods & CARBON_CMD
+    assert not mods & CARBON_CONTROL
+
+
+def test_accelerator_rejects_what_it_cannot_bind() -> None:
+    from safepaste.backend.darwin_loop import parse_accelerator
+
+    assert parse_accelerator("v") is None  # bare key: would grab it everywhere
+    assert parse_accelerator("") is None
+    assert parse_accelerator("<Control>") is None
+    assert parse_accelerator("<Nonsense>v") is None
+    assert parse_accelerator("<Control>F13") is None  # not in the key-code table
+
+
+def test_the_default_hotkey_is_bindable_here_too() -> None:
+    from safepaste.backend.darwin_loop import parse_accelerator
+    from safepaste.config import Config
+
+    assert parse_accelerator(Config().safe_paste_hotkey) is not None
+
+
+def _darwin_tray():
+    from safepaste.backend.darwin_loop import RunLoop, Tray
+
+    return Tray(RunLoop())
+
+
+def test_the_macos_menu_matches_the_other_platforms() -> None:
+    tray = _darwin_tray()
+    labels = [label for _k, label, _a in tray.build_menu_items() if label]
+    for expected in (
+        "Sanitise clipboard now",
+        "Redact automatically",
+        "Pause 15 minutes",
+        "Pause 1 hour",
+        "Preferences…",
+    ):
+        assert expected in labels
+    # The one deliberate difference: Mac convention names the application in Quit.
+    assert "Quit SafePaste" in labels
+
+
+def test_exactly_one_mode_is_checked_on_macos() -> None:
+    from safepaste.config import MODES
+
+    tray = _darwin_tray()
+    for mode in MODES:
+        tray.set_state(mode, False)
+        checked = [a for k, _l, a in tray.build_menu_items() if k == "mode" and a.get("checked")]
+        assert len(checked) == 1 and checked[0]["mode"] == mode
+
+
+def test_macos_status_line_does_not_claim_removal_in_other_modes() -> None:
+    tray = _darwin_tray()
+    tray.set_state("redact", False)
+    tray.set_alert(2)
+    assert "removed" in tray.build_menu_items()[0][1]
+    tray.set_state("notify", False)
+    tray.set_alert(2)
+    assert "found" in tray.build_menu_items()[0][1]
+
+
+def test_macos_symbol_follows_state() -> None:
+    tray = _darwin_tray()
+    tray.set_state("redact", False)
+    assert tray._symbol() == tray.SYMBOL_ACTIVE
+    tray.set_state("redact", True)
+    assert tray._symbol() == tray.SYMBOL_OFF
+    tray.set_state("off", False)
+    assert tray._symbol() == tray.SYMBOL_OFF
+    tray.set_state("redact", False)
+    tray.set_alert(1)
+    assert tray._symbol() == tray.SYMBOL_ALERT
+    assert "1 secret removed" in tray._tooltip()
+
+
+def test_macos_menu_actions_resolve() -> None:
+    from safepaste.backend.darwin_loop import RunLoop, Tray
+
+    calls: list[tuple] = []
+    tray = Tray(
+        RunLoop(),
+        on_mode=lambda m: calls.append(("mode", m)),
+        on_pause=lambda s: calls.append(("pause", s)),
+        on_resume=lambda: calls.append(("resume",)),
+        on_safe_paste=lambda: calls.append(("safe_paste",)),
+        on_preferences=lambda: calls.append(("preferences",)),
+        on_quit=lambda: calls.append(("quit",)),
+    )
+    tray.set_state("redact", True)
+    for kind, _label, attrs in tray.build_menu_items():
+        if kind in ("mode", "action"):
+            tray._resolve(kind, attrs)()
+    assert ("mode", "redact") in calls and ("pause", 3600) in calls
+    assert ("resume",) in calls and ("quit",) in calls
+
+
+def test_a_run_loop_that_never_started_pumps_harmlessly() -> None:
+    from safepaste.backend.darwin_loop import RunLoop
+
+    loop = RunLoop()
+    assert loop.ready is False
+    assert loop.pump() is True  # must not raise off a Mac

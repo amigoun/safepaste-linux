@@ -179,6 +179,51 @@ def main() -> int:
         )
         guard.stop()
 
+        # --- the run loop and what it unlocks --------------------------------
+        # Unreachable off a Mac, so this is the part the job exists for.
+        loop = backend.run_loop()
+        check("NSApplication run loop ready", loop is not None and loop.ready)
+
+        if loop is not None and loop.ready:
+            check("pumping the run loop is harmless", loop.pump() is True)
+
+            from safepaste.backend.darwin_loop import HotkeyBinder, Tray, parse_accelerator
+
+            # NSStatusItem. A CI runner has no interactive session, so a refusal here
+            # is acceptable; raising is not.
+            tray = Tray(loop, on_quit=lambda: None)
+            added = tray.start()
+            check(
+                "status item start() returns a bool rather than raising",
+                isinstance(added, bool),
+                f"added={added} (False is acceptable with no interactive session)",
+            )
+            check(
+                "the menu is well-formed regardless",
+                len(tray.build_menu_items()) >= 10
+                and tray.build_menu_items()[0][2]["enabled"] is False,
+            )
+            if added:
+                tray.set_state("notify", False)
+                tray.set_alert(2)
+                tray.clear_alert()
+                check("state changes survive a real status item", True)
+                tray.stop()
+
+            # Carbon RegisterEventHotKey needs no Accessibility grant, so unlike
+            # injection this should genuinely succeed.
+            accel = "<Control><Option>9"
+            check("the accelerator parses to Carbon codes",
+                  parse_accelerator(accel) is not None)
+            binder = HotkeyBinder(loop, lambda: None)
+            check("Carbon is loadable", binder.available() is True)
+            if binder.available():
+                installed = binder.install(accel)
+                check("a global hotkey registers", installed, accel)
+                if installed:
+                    check("it reports itself installed", binder.installed() is True)
+                    check("unregistering succeeds", binder.uninstall() is True)
+
         # --- injection is permission-gated, and must decline politely --------
         injector = DarwinInjector()
         trusted = injector.ready

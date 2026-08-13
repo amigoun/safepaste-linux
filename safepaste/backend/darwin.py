@@ -1,11 +1,9 @@
 """The macOS backend.
 
-**Unverified on real hardware.** This was written on Linux, with no Mac, no
-PyObjC and no toolchain available. The logic below — change-count polling, own-write
-suppression, flavour handling, multi-representation writes — is covered by
-tests/test_darwin.py against a fake pasteboard. Every actual AppKit call is
-unexercised. Treat first run on a Mac as the real test; see the checklist at the
-bottom of this docstring.
+Written on Linux with no Mac to hand, then verified against a real NSPasteboard on
+a macos-latest CI runner — see scripts/verify-darwin.py, which the `macos` job runs
+on every push. The unit tests drive a *fake* pasteboard, so they establish the
+logic and say nothing about the PyObjC calls; that job is what covers those.
 
 Why macOS is a friendlier target than Wayland, which is worth stating because the
 Linux backend's size is misleading:
@@ -30,16 +28,15 @@ implemented yet:
   This is the piece that is impossible on GNOME (`org.gnome.Shell.Introspect`
   returns Access denied), so it is the most valuable thing to build here next.
 
-Deliberately returning None for now, which the contract already degrades over:
-`hotkey_binder` (Carbon RegisterEventHotKey needs a run loop and a bundled app to
-behave) and `tray` (NSStatusItem likewise). A macOS user gets clipboard monitoring,
-redaction and notifications; the on-demand path is reachable through the CLI.
+The status item and global hotkey live in `.darwin_loop`, because both need a
+serviced NSApplication run loop and neither was possible until something provided
+one. `pump()` services it, so the existing polling shell drives all of it.
 
 First-run checklist on a Mac:
     python3 -m pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz regex
     python3 -m safepaste rules --stats        # portable core, should just work
     python3 -m safepaste.backend.darwin       # self-check against the real pasteboard
-    python3 -m safepaste.daemon -v            # needs the Darwin shell, see daemon_darwin
+    python3 -m safepaste.service -v           # the polling shell, tray and hotkey
 Accessibility permission (System Settings > Privacy & Security) is required only
 for injection, and only if auto_paste is switched on.
 """
@@ -432,6 +429,46 @@ class DarwinBackend(Backend):
     def clipboard_writer(self) -> ClipboardWriter:
         return DarwinClipboardWriter(self._pb())
 
+    def run_loop(self):
+        """NSApplication and its pump, created on first use.
+
+        Shared, because the status item and the hotkey both need a serviced run
+        loop and there must only be one NSApplication.
+        """
+        if getattr(self, "_loop", None) is None:
+            from .darwin_loop import RunLoop
+
+            loop = RunLoop()
+            self._loop = loop if loop.start() else False
+        return self._loop or None
+
+    def hotkey_binder(
+        self, on_pressed: Callable[[], None] | None = None
+    ) -> Any:
+        if on_pressed is None:
+            return None
+        loop = self.run_loop()
+        if loop is None:
+            return None
+        from .darwin_loop import HotkeyBinder
+
+        binder = HotkeyBinder(loop, on_pressed)
+        return binder if binder.available() else None
+
+    def tray(self, **callbacks: Callable) -> Any:
+        loop = self.run_loop()
+        if loop is None:
+            return None
+        from .darwin_loop import Tray
+
+        return Tray(loop, **callbacks)
+
+    def pump(self) -> bool:
+        loop = getattr(self, "_loop", None)
+        if not loop:
+            return True
+        return loop.pump()
+
     def injector(
         self,
         restore_token: str | None = None,
@@ -442,11 +479,8 @@ class DarwinBackend(Backend):
         # nothing for us to store.
         return DarwinInjector()
 
-    # lock_watcher, hotkey_binder and tray inherit None from Backend.
-    #
-    # No lock watcher is needed: unlike wl-clipboard, NSPasteboard does not block
-    # while the screen is locked. The other two need an NSApplication run loop and
-    # a bundled app to behave properly, so they wait for the Darwin shell.
+    # lock_watcher inherits None: unlike wl-clipboard, NSPasteboard does not block
+    # while the screen is locked, so there is nothing to watch for.
 
 
 def _self_check() -> int:
