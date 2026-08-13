@@ -1,0 +1,48 @@
+{
+    "version": "0.3.0",
+    "description": "Clipboard secret-guard. Detects credentials the moment they are copied and redacts them before they can be pasted.",
+    "homepage": "https://github.com/amigoun/safepaste-linux",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/amigoun/safepaste-linux/releases/download/v0.3.0/safepaste-0.3.0-win64.zip",
+            "hash": "REPLACED_AT_RELEASE",
+            "extract_dir": "safepaste-0.3.0-win64"
+        }
+    },
+    "bin": [
+        "safepaste.exe",
+        "safepaste-daemon.exe"
+    ],
+    "notes": [
+        "SafePaste is installed but not yet running.",
+        "",
+        "Start the background guard:",
+        "    safepaste-daemon",
+        "",
+        "It places a shield icon in the notification area and binds Ctrl+Alt+V to",
+        "sanitise the clipboard on demand. To run it at login, add a shortcut to",
+        "safepaste-daemon.exe in your Startup folder (Win+R, shell:startup).",
+        "",
+        "The CLI works without the daemon:",
+        "    safepaste scan -      reads stdin, exits 1 if it finds a secret",
+        "    safepaste redact -    writes the sanitised text to stdout",
+        "    safepaste rules       lists the 231 detectors",
+        "",
+        "Settings live in %APPDATA%\\SafePaste\\config.toml. Per-application policy",
+        "is supported on Windows: see the [policy] section in the README.",
+        "",
+        "The executables are unsigned, so SmartScreen may warn on first run."
+    ],
+    "checkver": {
+        "github": "https://github.com/amigoun/safepaste-linux"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/amigoun/safepaste-linux/releases/download/v$version/safepaste-$version-win64.zip",
+                "extract_dir": "safepaste-$version-win64"
+            }
+        }
+    }
+}
