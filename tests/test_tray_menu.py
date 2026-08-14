@@ -17,8 +17,14 @@ import pytest
 # so skipping is the honest outcome rather than a failure.
 pytest.importorskip("gi", reason="python3-gi not installed; the tray cannot exist")
 
+from gi.repository import GLib  # noqa: E402
+
 from safepaste.config import MODES  # noqa: E402
-from safepaste.ui.tray import TrayIndicator  # noqa: E402
+from safepaste.ui.tray import (  # noqa: E402
+    MENU_INTERFACE,
+    MENU_OBJECT_PATH,
+    TrayIndicator,
+)
 
 
 def _can_build_widgets() -> bool:
@@ -301,3 +307,145 @@ def test_the_dialog_still_works_without_one() -> None:
     )
     assert dialog.get_transient_for() is None
     assert dialog.get_heading()
+
+
+# ---------------------------------------------------------------------------
+# Change notification
+#
+# The tray was announcing every runtime change with LayoutUpdated, which is the
+# dbusmenu signal for a changed *item set*. GNOME's appindicator extension reads
+# the layout with propertyNames=['type', 'children-display'] and copies only what
+# it asked for onto items it already has, so a label change announced that way
+# never reaches the screen -- "Protection active" stayed on a menu whose server
+# was reporting "Paused", for the life of the session, however many times it was
+# reopened. Worse, that host prefers LayoutUpdated in an `else if` and then clears
+# its pending-properties flag, so sending it actively suppressed the refresh.
+#
+# Hence: property changes go out as ItemsPropertiesUpdated, and LayoutUpdated is
+# reserved for a genuinely different set of items.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingConnection:
+    """Stands in for Gio.DBusConnection, recording only what was emitted."""
+
+    def __init__(self) -> None:
+        self.emitted: list[tuple[str, str, str, object]] = []
+
+    def emit_signal(self, _dest, path, interface, name, params):  # noqa: ANN001
+        self.emitted.append((path, interface, name, params))
+
+
+class _RecordingInvocation:
+    """Stands in for Gio.DBusMethodInvocation."""
+
+    def __init__(self) -> None:
+        self.value = None
+        self.error = None
+
+    def return_value(self, value) -> None:  # noqa: ANN001
+        self.value = value
+
+    def return_error_literal(self, _domain, _code, message) -> None:  # noqa: ANN001
+        self.error = message
+
+
+def _menu_signals(conn: _RecordingConnection) -> list[str]:
+    return [name for _p, iface, name, _v in conn.emitted if iface == MENU_INTERFACE]
+
+
+def _call_menu(tray: TrayIndicator, method: str, params):  # noqa: ANN001
+    invocation = _RecordingInvocation()
+    tray._handle_menu_method_call(
+        None, None, MENU_OBJECT_PATH, MENU_INTERFACE, method, params, invocation
+    )
+    assert invocation.error is None, invocation.error
+    return invocation.value
+
+
+def test_a_state_change_announces_properties_not_a_new_layout(
+    tray: TrayIndicator,
+) -> None:
+    tray._connection = conn = _RecordingConnection()
+    tray.set_state("redact", True)
+
+    signals = _menu_signals(conn)
+    assert "ItemsPropertiesUpdated" in signals
+    # The regression: this is the signal that cannot carry a label change, and
+    # whose presence stops the host asking for one.
+    assert "LayoutUpdated" not in signals
+
+
+def test_the_property_signal_carries_the_visible_change(tray: TrayIndicator) -> None:
+    tray._connection = conn = _RecordingConnection()
+    tray.set_state("redact", True)
+
+    params = next(
+        v for _p, _i, name, v in conn.emitted if name == "ItemsPropertiesUpdated"
+    )
+    updated, removed = params.unpack()
+    props = dict(updated)
+
+    assert props[TrayIndicator._ID_STATUS]["label"] == "Paused"
+    assert props[TrayIndicator._ID_RESUME]["visible"] is True
+    # Every item always carries the same key set, so nothing is ever "removed";
+    # a host that trusted a non-empty removal list would drop live properties.
+    assert removed == []
+
+
+def test_resuming_reverts_both_the_label_and_the_visibility(
+    tray: TrayIndicator,
+) -> None:
+    tray._connection = conn = _RecordingConnection()
+    tray.set_state("redact", True)
+    tray.set_state("redact", False)
+
+    params = [v for _p, _i, name, v in conn.emitted if name == "ItemsPropertiesUpdated"]
+    updated, _removed = params[-1].unpack()
+    props = dict(updated)
+    assert props[TrayIndicator._ID_STATUS]["label"] != "Paused"
+    assert props[TrayIndicator._ID_RESUME]["visible"] is False
+
+
+def test_about_to_show_reports_whether_the_host_is_behind(
+    tray: TrayIndicator,
+) -> None:
+    # Reading the layout brings the host up to date...
+    _call_menu(tray, "GetLayout", GLib.Variant("(iias)", (0, -1, [])))
+    assert _call_menu(tray, "AboutToShow", GLib.Variant("(i)", (0,))).unpack() == (
+        False,
+    )
+
+    # ...and a state change leaves it behind again. Answering False here is what
+    # let hosts that refresh lazily on open render a stale menu.
+    tray.set_state("redact", True)
+    assert _call_menu(tray, "AboutToShow", GLib.Variant("(i)", (0,))).unpack() == (
+        True,
+    )
+
+
+def test_the_layout_and_the_property_signal_cannot_disagree(
+    tray: TrayIndicator,
+) -> None:
+    # Both are built from the same tree on demand, and this is the assertion that
+    # keeps it that way: whatever the signal claims, GetLayout must confirm.
+    tray._connection = conn = _RecordingConnection()
+    tray.set_state("notify", True)
+
+    params = next(
+        v for _p, _i, name, v in conn.emitted if name == "ItemsPropertiesUpdated"
+    )
+    announced = dict(params.unpack()[0])
+
+    _revision, root = _call_menu(
+        tray, "GetLayout", GLib.Variant("(iias)", (0, -1, []))
+    ).unpack()
+
+    def walk(node) -> None:  # noqa: ANN001
+        ident, props, children = node
+        for key, value in props.items():
+            assert announced[ident][key] == value, (ident, key)
+        for child in children:
+            walk(child)
+
+    walk(root)

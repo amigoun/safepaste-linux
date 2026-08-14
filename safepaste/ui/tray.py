@@ -261,6 +261,12 @@ class TrayIndicator:
         self._paused = False
         self._alert_secrets: int | None = None
         self._revision = 1  # dbusmenu layout revision; 0 would mean "never set"
+        # What the host has actually been given, as of its last GetLayout. The
+        # revision answers AboutToShow ("is what you hold stale?"); the id set
+        # decides whether a change is structural. None means it has never read the
+        # layout, in which case nothing can be structural *to it* yet.
+        self._served_revision = 0
+        self._served_ids: tuple[int, ...] | None = None
 
         # A unique bus name per process, as the spec requires -- not the
         # well-known BUS_NAME style daemon.py uses, since many SafePaste
@@ -500,7 +506,69 @@ class TrayIndicator:
 
     def _notify_change(self) -> None:
         self._emit_sni_update()
-        self._emit_layout_updated()
+        self._emit_menu_update()
+
+    def _emit_menu_update(self) -> None:
+        """Tell the host the menu changed, using the signal it acts on.
+
+        dbusmenu splits change notification in two, and choosing the wrong one
+        fails *silently*:
+
+            LayoutUpdated          the set of items changed
+            ItemsPropertiesUpdated an item's label/visibility/toggle changed
+
+        Everything this tray changes at runtime is the second kind -- "Protection
+        active" becoming "Paused", the radio tick moving, "Resume protection"
+        appearing -- and it was announcing all of it with the first. GNOME's
+        appindicator extension requests the layout with
+        `propertyNames = ['type', 'children-display']` and copies only what it
+        asked for onto existing items, so a layout re-read cannot change a label.
+        The menu therefore kept whatever text it was built with, for the life of
+        the session, no matter how many times it was reopened.
+
+        Worse than useless: in that host LayoutUpdated *suppresses* the property
+        path, because the activation handler prefers it in an `else if` and then
+        clears the pending properties flag. So this emits one or the other, never
+        both, and structure wins only when the structure actually changed -- which
+        for this menu is never after start, since hiding an item is a `visible`
+        property and not a structural edit.
+        """
+        flat = self._flatten(self._build_tree())
+        ids = tuple(sorted(flat))
+        # Structural only relative to what the host holds. Before its first
+        # GetLayout it holds nothing, so there is no structure to have changed --
+        # getting that backwards made the *first* state change of every session
+        # take the layout path, which is exactly the case that has to work.
+        structural = self._served_ids is not None and ids != self._served_ids
+        self._revision += 1
+        if self._connection is None:
+            return
+        try:
+            if structural:
+                self._connection.emit_signal(
+                    None,
+                    MENU_OBJECT_PATH,
+                    MENU_INTERFACE,
+                    "LayoutUpdated",
+                    GLib.Variant("(ui)", (self._revision, self._ID_ROOT)),
+                )
+                return
+            # Every property of every item, rather than a computed diff. Sixteen
+            # nodes make the saving imaginary, and a diff is one more thing that
+            # can disagree with what GetLayout would say.
+            updated = [
+                (item_id, self._wrap_props(node["props"], []))
+                for item_id, node in sorted(flat.items())
+            ]
+            self._connection.emit_signal(
+                None,
+                MENU_OBJECT_PATH,
+                MENU_INTERFACE,
+                "ItemsPropertiesUpdated",
+                GLib.Variant("(a(ia{sv})a(ias))", (updated, [])),
+            )
+        except GLib.Error as exc:
+            log.debug("tray: could not emit a menu update signal: %s", exc)
 
     def _emit_sni_update(self) -> None:
         if self._connection is None:
@@ -521,21 +589,6 @@ class TrayIndicator:
             )
         except GLib.Error as exc:
             log.debug("tray: could not emit SNI update signal(s): %s", exc)
-
-    def _emit_layout_updated(self) -> None:
-        self._revision += 1
-        if self._connection is None:
-            return
-        try:
-            self._connection.emit_signal(
-                None,
-                MENU_OBJECT_PATH,
-                MENU_INTERFACE,
-                "LayoutUpdated",
-                GLib.Variant("(ui)", (self._revision, self._ID_ROOT)),
-            )
-        except GLib.Error as exc:
-            log.debug("tray: could not emit LayoutUpdated: %s", exc)
 
     # -- StatusNotifierItem: properties and methods -----------------------------
 
@@ -802,6 +855,8 @@ class TrayIndicator:
                 if node is None:
                     raise LookupError(f"no such menu item: {parent_id}")
                 layout = self._node_tuple(node, names, recursion_depth)
+                self._served_revision = self._revision
+                self._served_ids = tuple(sorted(self._flatten(self._build_tree())))
                 invocation.return_value(
                     GLib.Variant("(u(ia{sv}av))", (self._revision, layout))
                 )
@@ -842,9 +897,14 @@ class TrayIndicator:
                 invocation.return_value(GLib.Variant("(ai)", (errors,)))
             elif method == "AboutToShow":
                 (_item_id,) = params.unpack()
-                # Layout is always pushed proactively via LayoutUpdated (see
-                # `_notify_change`), so there is never a lazy update to do here.
-                invocation.return_value(GLib.Variant("(b)", (False,)))
+                # "Is what you already have stale?" -- and it can be, so this used
+                # to answer False on a comment's word rather than a check. Hosts
+                # that refresh lazily on open (KDE, xfce4-panel) took that as
+                # permission to render a cached menu; GNOME asks too, right after
+                # it reacts to our signals.
+                invocation.return_value(
+                    GLib.Variant("(b)", (self._revision > self._served_revision,))
+                )
             elif method == "AboutToShowGroup":
                 (ids,) = params.unpack()
                 flat = self._flatten(self._build_tree())
