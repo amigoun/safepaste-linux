@@ -100,12 +100,18 @@ class Daemon:
         cfg: config_mod.Config | None = None,
         *,
         on_detection=None,
+        on_state_changed=None,
         backend: Backend | None = None,
     ) -> None:
         # Interposed rather than passed straight through: the bus signal must
         # fire for every detection regardless of whether a front end is attached,
         # and Guard should not know that D-Bus exists.
         self._forward_detection = on_detection
+        # Fired after the mode or pause state changes by *any* route. Without it a
+        # front end only learns about changes it made itself, so `gdbus ... SetPaused`
+        # or `safepaste`'s own D-Bus surface would pause protection while the tray
+        # went on claiming to be guarding.
+        self._forward_state_change = on_state_changed
         self.guard = Guard(
             cfg,
             backend=backend or get_backend(),
@@ -134,9 +140,27 @@ class Daemon:
     safe_paste = property(lambda self: self.guard.safe_paste)
     restore_original = property(lambda self: self.guard.restore_original)
     exclude_last_value = property(lambda self: self.guard.exclude_last_value)
-    set_mode = property(lambda self: self.guard.set_mode)
-    set_paused = property(lambda self: self.guard.set_paused)
     reload = property(lambda self: self.guard.reload)
+
+    # Not delegating properties like the rest: every route into these -- the tray,
+    # D-Bus, a future extension -- has to end in the same notification, and a
+    # `property(lambda ...)` shortcut is exactly how the tray came to reflect only
+    # the changes it made itself.
+    def set_mode(self, mode: str) -> None:
+        self.guard.set_mode(mode)
+        self._notify_state_changed()
+
+    def set_paused(self, paused: bool, seconds: int = 0) -> None:
+        self.guard.set_paused(paused, seconds)
+        self._notify_state_changed()
+
+    def _notify_state_changed(self) -> None:
+        if self._forward_state_change is None:
+            return
+        try:
+            self._forward_state_change()
+        except Exception:  # noqa: BLE001 - a repaint must not take the daemon down
+            log.exception("state-change observer failed")
 
     def _on_detection(self, findings, result, event) -> None:
         from .detector import summarise

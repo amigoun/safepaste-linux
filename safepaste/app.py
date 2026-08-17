@@ -29,6 +29,11 @@ log = logging.getLogger(__name__)
 
 APP_ID = "dev.safepaste.SafePaste"
 
+# How long the "N secrets removed" notice stays up when there is no restore
+# window to tie it to (retention switched off). Long enough to read and notice,
+# short enough that it is never mistaken for the current protection state.
+ALERT_FALLBACK_SECS = 20
+
 
 class SafePasteApp(Adw.Application):
     def __init__(self, cfg: config_mod.Config | None = None) -> None:
@@ -38,10 +43,18 @@ class SafePasteApp(Adw.Application):
             flags=Gio.ApplicationFlags.DEFAULT_FLAGS,
         )
         self.config = cfg or config_mod.load()
-        self.daemon = Daemon(self.config, on_detection=self._on_detection)
+        self.daemon = Daemon(
+            self.config,
+            on_detection=self._on_detection,
+            # So the tray follows the daemon's state rather than only the changes
+            # made through the tray: a pause over D-Bus used to leave the menu
+            # claiming to be guarding.
+            on_state_changed=self._refresh_tray,
+        )
         self.tray = None
         self._prefs_window = None
         self._current_dialog = None
+        self._alert_timer: int | None = None
         # A window that is never presented, existing only to be the dialogs'
         # transient parent. SafePaste has no primary window, and GTK complains about
         # every parentless dialog; this is the cheapest thing that satisfies it.
@@ -116,16 +129,57 @@ class SafePasteApp(Adw.Application):
             self.tray = None
 
     def _refresh_tray(self) -> None:
+        if self.tray is None:
+            return
+        # A deliberate mode or pause change ends the previous detection's notice:
+        # the user has moved on, and leaving it up is how "1 secret removed" came
+        # to sit above a paused guard.
+        self._clear_alert()
+        self.tray.set_state(self.config.mode, self.daemon.paused)
+
+    # -- the transient detection notice ------------------------------------
+
+    def _show_alert(self, secrets: int) -> None:
+        if self.tray is None:
+            return
+        self.tray.set_alert(secrets)
+        # Expire it. `clear_alert()` had no caller anywhere, so one detection left
+        # the tray reading "1 secret removed" -- and reporting NeedsAttention -- for
+        # the rest of the session.
+        #
+        # The lifetime is the restore window, because that is exactly how long the
+        # event stays actionable: while the original is still held, "1 secret
+        # removed" is something you can still do something about. With retention
+        # switched off there is no such window, so fall back to long enough to read.
+        seconds = self.config.restore_timeout_secs or ALERT_FALLBACK_SECS
+        self._cancel_alert_timer()
+        self._alert_timer = GLib.timeout_add_seconds(seconds, self._on_alert_expired)
+
+    def _on_alert_expired(self) -> bool:
+        self._alert_timer = None
         if self.tray is not None:
-            self.tray.set_state(self.config.mode, self.daemon.paused)
+            self.tray.clear_alert()
+        return GLib.SOURCE_REMOVE
+
+    def _cancel_alert_timer(self) -> None:
+        # A newer detection restarts the clock rather than inheriting the old one,
+        # which would otherwise clear the new notice early.
+        if self._alert_timer is not None:
+            GLib.source_remove(self._alert_timer)
+            self._alert_timer = None
+
+    def _clear_alert(self) -> None:
+        self._cancel_alert_timer()
+        if self.tray is not None:
+            self.tray.clear_alert()
 
     def _set_mode(self, mode: str) -> None:
+        # No explicit repaint: the daemon notifies on every state change, whatever
+        # route it arrived by, and this is one of those routes.
         self.daemon.set_mode(mode)
-        self._refresh_tray()
 
     def _set_paused(self, paused: bool, seconds: int) -> None:
         self.daemon.set_paused(paused, seconds)
-        self._refresh_tray()
         if paused and seconds:
             # Come back and repaint once the pause lapses, so the icon does not
             # sit there claiming to be paused after protection has resumed.
@@ -140,8 +194,7 @@ class SafePasteApp(Adw.Application):
     def _on_detection(self, findings: list, result, event) -> None:
         """Called by the daemon after a scan that found something."""
         secrets = result.secrets_removed if result.changed else len(findings)
-        if self.tray is not None:
-            self.tray.set_alert(secrets)
+        self._show_alert(secrets)
 
         mode = self.config.mode
         if mode == "notify":

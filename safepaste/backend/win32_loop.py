@@ -549,6 +549,15 @@ class Tray:
     # -- state -------------------------------------------------------------
 
     def set_state(self, mode: str, paused: bool) -> None:
+        """Set mode and pause state, and drop any detection notice.
+
+        Clearing `_alert` here is why the text below can test it first: a
+        change of state ends the previous event's notice, so "1 secret
+        removed" can never be left sitting above a paused guard. The GTK tray
+        reaches the same guarantee the other way round -- it checks paused
+        first and lets its front end own the notice's lifetime -- so do not
+        "align" the two by reordering one of them alone.
+        """
         self._mode, self._paused, self._alert = mode, paused, None
         self._refresh()
 

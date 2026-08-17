@@ -449,3 +449,72 @@ def test_the_layout_and_the_property_signal_cannot_disagree(
             walk(child)
 
     walk(root)
+
+
+# ---------------------------------------------------------------------------
+# The detection notice vs. the protection state
+#
+# `set_alert` shows "N secrets removed". It used to outrank everything, and
+# `clear_alert()` had no caller anywhere in the project -- so one detection pinned
+# that line to the menu for the rest of the session, and pausing protection left it
+# reading "1 secret removed" above a guard that had stopped guarding. Of all the
+# things this menu can get wrong, implying protection is working when it is off is
+# the one that costs something.
+# ---------------------------------------------------------------------------
+
+
+def _status_line(tray: TrayIndicator) -> str:
+    return TrayIndicator._flatten(tray._build_tree())[TrayIndicator._ID_STATUS][
+        "props"
+    ]["label"]
+
+
+def test_the_alert_shows_while_protection_is_engaged(tray: TrayIndicator) -> None:
+    tray.set_state("redact", False)
+    tray.set_alert(1)
+    assert _status_line(tray) == "1 secret removed"
+
+
+def test_pausing_outranks_the_alert(tray: TrayIndicator) -> None:
+    tray.set_alert(1)
+    tray.set_state("redact", True)
+    assert _status_line(tray) == "Paused"
+    assert tray._tooltip_body() == "Paused"
+    # And the icon must not keep asking for attention on a paused guard.
+    assert tray._status() == "Active"
+
+
+def test_mode_off_outranks_the_alert(tray: TrayIndicator) -> None:
+    tray.set_alert(2)
+    tray.set_state("off", False)
+    assert _status_line(tray) == "Protection off"
+    assert tray._status() == "Active"
+
+
+def test_the_alert_returns_once_protection_resumes(tray: TrayIndicator) -> None:
+    # Resuming does not resurrect it in practice, because the front end clears the
+    # notice on any deliberate state change -- but the tray is dumb by design, so
+    # what it does on its own is worth pinning down.
+    tray.set_alert(1)
+    tray.set_state("redact", True)
+    assert _status_line(tray) == "Paused"
+    tray.set_state("redact", False)
+    assert _status_line(tray) == "1 secret removed"
+
+
+def test_clearing_the_alert_reverts_to_the_mode_line(tray: TrayIndicator) -> None:
+    tray.set_alert(3)
+    assert _status_line(tray) != "Protected"
+    tray.clear_alert()
+    assert _status_line(tray) == "Protected"
+    assert tray._status() == "Active"
+
+
+def test_the_alert_says_found_not_removed_when_nothing_was_removed(
+    tray: TrayIndicator,
+) -> None:
+    # notify mode leaves the secret on the clipboard; claiming it was removed
+    # would be the same class of lie as the paused case.
+    tray.set_state("notify", False)
+    tray.set_alert(1)
+    assert _status_line(tray) == "1 secret found"

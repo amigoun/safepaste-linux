@@ -31,6 +31,11 @@ from .guard import Guard
 
 log = logging.getLogger(__name__)
 
+# How long "N secrets removed" stays up when there is no restore window to tie it
+# to. Duplicated from app.py rather than imported: that module pulls in GTK, which
+# does not exist on the platforms this shell runs on.
+ALERT_FALLBACK_SECS = 20
+
 
 class _SleepTimer:
     """Guard's one-shot scheduler, expressed as a deadline the loop checks.
@@ -76,6 +81,9 @@ class PollingShell:
     ) -> None:
         self.interval = interval
         self.timer = _SleepTimer()
+        # Handle of the pending "N secrets removed" expiry, so a newer detection
+        # restarts the clock instead of inheriting the old one.
+        self._alert_handle: Any = None
         self.notify = notify if notify is not None else _default_notifier()
         self.guard = Guard(
             cfg,
@@ -106,6 +114,17 @@ class PollingShell:
 
         if self._tray is not None:
             self._tray.set_alert(secrets)
+            # And take it down again. Without this one detection leaves the tray
+            # reading "1 secret removed" for the rest of the session -- a claim
+            # about the past sitting where the current state belongs. The lifetime
+            # is the restore window, which is exactly how long the event stays
+            # actionable; with retention off, long enough to read.
+            if self._alert_handle is not None:
+                self.timer.cancel(self._alert_handle)
+            self._alert_handle = self.timer.schedule(
+                self.guard.config.restore_timeout_secs or ALERT_FALLBACK_SECS,
+                self._expire_alert,
+            )
 
         if self.guard.config.mode == "redact":
             title = f"{secrets} {noun} removed from the clipboard"
@@ -155,6 +174,11 @@ class PollingShell:
             tray.set_state(self.guard.config.mode, self.guard.paused)
         elif tray is not None:
             log.info("no tray icon on this session; everything else is unaffected")
+
+    def _expire_alert(self) -> None:
+        self._alert_handle = None
+        if self._tray is not None:
+            self._tray.clear_alert()
 
     def _set_mode(self, mode: str) -> None:
         self.guard.set_mode(mode)

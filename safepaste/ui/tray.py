@@ -593,6 +593,10 @@ class TrayIndicator:
     # -- StatusNotifierItem: properties and methods -----------------------------
 
     def _status(self) -> str:
+        if self._paused or self._mode == "off":
+            # An attention-seeking icon while protection is off is the same lie the
+            # status line would be telling. The icon still changes, via IconName.
+            return "Active"
         return "NeedsAttention" if self._alert_secrets is not None else "Active"
 
     def _icon_name(self) -> str:
@@ -601,6 +605,15 @@ class TrayIndicator:
         return ICON_ACTIVE
 
     def _status_line_text(self) -> str:
+        # Pause and off outrank the alert deliberately. The alert reports something
+        # that already happened; "Paused" reports whether you are protected *now*,
+        # and when the two disagree the one that could get a secret pasted wins. A
+        # line reading "1 secret removed" above a paused guard implies it is still
+        # working, which is the single most misleading thing this menu could say.
+        if self._paused:
+            return "Paused"
+        if self._mode == "off":
+            return _MODE_STATUS.get("off", "off")
         if self._alert_secrets is not None:
             n = self._alert_secrets
             noun = "secret" if n == 1 else "secrets"
@@ -614,6 +627,11 @@ class TrayIndicator:
         return _MODE_STATUS.get(self._mode, self._mode)
 
     def _tooltip_body(self) -> str:
+        # Same precedence as the status line, for the same reason.
+        if self._paused:
+            return "Paused"
+        if self._mode == "off":
+            return _MODE_TOOLTIP.get("off", "off")
         if self._alert_secrets is not None:
             n = self._alert_secrets
             noun = "secret" if n == 1 else "secrets"
