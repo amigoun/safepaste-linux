@@ -341,7 +341,15 @@ jobs:
           if (-not (Test-Path "$env:USERPROFILE\scoop\shims\safepaste-daemon.exe")) {
             throw "the manifest did not shim safepaste-daemon"
           }
-          Write-Host "::notice::installed via Scoop: $(scoop list safepaste | Out-String)"
+          # The version directory Scoop created, rather than `scoop list`, whose
+          # object output came back empty through Out-String and left this notice
+          # printing nothing at all -- the one line meant to record *which* version
+          # the manifest actually pulled.
+          $apps = "$env:USERPROFILE\scoop\apps\safepaste"
+          $installed = (Get-ChildItem $apps -Directory |
+            Where-Object Name -ne 'current').Name -join ', '
+          if (-not $installed) { throw "scoop installed nothing under $apps" }
+          Write-Host "::notice::installed via Scoop: safepaste $installed"
           scoop uninstall safepaste
 
       - name: The CLI works with no desktop at all
