@@ -196,7 +196,7 @@ _MODE_LABELS: dict[str, str] = {
 # The status line and tooltip both describe "what's true right now"; the
 # tray has no reference to the daemon or its rule count by design (see the
 # module docstring), so these are deliberately count-free -- unlike, say,
-# "Protected -- 231 rules active", which would need a channel this class does
+# "Protected -- 232 rules active", which would need a channel this class does
 # not have.
 _MODE_STATUS: dict[str, str] = {
     "redact": "Protected",

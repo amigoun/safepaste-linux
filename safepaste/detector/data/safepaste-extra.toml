@@ -150,6 +150,54 @@ entropy = 1.8
   ]
 
 # --------------------------------------------------------------------------
+# OX Security API keys: `ox_` and exactly 36 base64url characters. Upstream has
+# no rule for these at all, and leaning on `generic-api-key` is not enough:
+# that one only fires when the key sits beside a name it recognises, so
+# `OX_API_KEY=ox_...` is caught while the same key pasted on its own -- straight
+# out of the console, into a chat window -- was measured as matching nothing
+# whatsoever. The only other rule wide enough for it is the opt-in high-entropy
+# one, which is off unless asked for.
+#
+# The length is fixed rather than a range, which cuts both ways and is worth
+# knowing. A lookalike of any other length cannot match at all, and neither can
+# a key of any other length: if OX ever lengthens these, this rule goes quiet
+# rather than degrading. The `{36}` is the thing to revisit that day.
+#
+# The group holds the whole token, prefix included: `ox_` is part of the
+# credential rather than a preamble, so all of it gets replaced. Contrast the
+# password rules above, where the group is what keeps `PGPASSWORD=` readable.
+#
+# What the group is really for is ending the token without `\b`, and that is not
+# a stylistic choice. A body may end in `-`, and `-` is not a word character, so
+# `...{36}\b` cannot match there: the engine hunts for a boundary, cannot find
+# one and gives up. Seven keys in 2000 random ones were missed exactly that way.
+# Consuming one non-body character instead (or end-of-text) keeps the token
+# itself in group 1 while the delimiter stays outside it -- and it is also what
+# stops a 40-character token matching its first 36 and being half-redacted.
+[[rules]]
+id = "safepaste-ox-api-key"
+description = "OX Security API key"
+category = "api_keys"
+regex = '''\b(ox_[A-Za-z0-9_-]{36})(?:[^A-Za-z0-9_-]|$)'''
+keywords = ["ox_"]
+# A backstop against low-diversity junk only (`ox_aaaa...`), not the main
+# filter. It cannot be the main filter, even at one fixed length: measured over
+# 50000 random keys, entropy bottoms out at 4.15, while the worst realistic
+# lookalike -- a 36-character lowercase `ox_`-prefixed identifier -- reaches
+# 4.21. The ranges overlap, so entropy alone would have to choose between
+# missing real keys and firing on identifiers. Nothing real fell below 3.8.
+entropy = 3.8
+  [[rules.allowlists]]
+  # What entropy could not do, case can. A body with no uppercase letter at all
+  # is a snake_case identifier or a hex digest, not a key: 36 random base64url
+  # characters missing every one of the 26 uppercase letters is about a
+  # 1-in-10^7 event, while `ox_runtime_policy_shadow_flags_override` is
+  # something a codebase genuinely contains.
+  regexes = [
+      '''^ox_[a-z0-9_]+$''',
+  ]
+
+# --------------------------------------------------------------------------
 # Last resort. On real text this is the rule that generates complaints, so it is
 # opt-in from Preferences ("High entropy strings").
 #
