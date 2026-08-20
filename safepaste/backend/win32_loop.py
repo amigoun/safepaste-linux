@@ -528,13 +528,14 @@ class Tray:
         on_resume: Callable[[], None] | None = None,
         on_safe_paste: Callable[[], None] | None = None,
         on_preferences: Callable[[], None] | None = None,
+        on_about: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
     ) -> None:
         self._window = window
         self._callbacks = {
             "mode": on_mode, "pause": on_pause, "resume": on_resume,
             "safe_paste": on_safe_paste, "preferences": on_preferences,
-            "quit": on_quit,
+            "about": on_about, "quit": on_quit,
         }
         self._added = False
         self._mode = "redact"
@@ -725,6 +726,7 @@ class Tray:
             items.append(("action", "Resume protection", {"action": "resume"}))
         items.append(("separator", "", {}))
         items.append(("action", "Preferences…", {"action": "preferences"}))
+        items.append(("action", "About SafePaste", {"action": "about"}))
         items.append(("action", "Quit", {"action": "quit"}))
         return items
 

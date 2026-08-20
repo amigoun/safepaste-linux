@@ -89,6 +89,14 @@ TRUE_POSITIVES = [
         id="netrc-password",
     ),
     pytest.param(
+        # Bare, with no `KEY=` around it -- which is how one of these arrives
+        # in a chat window, and what nothing in the vendored set catches.
+        "ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-",
+        "safepaste-ox-api-key",
+        "ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-",
+        id="ox-api-key-bare-paste",
+    ),
+    pytest.param(
         "export DB_PASSWORD=Kx92mQzR7v",
         "safepaste-env-password-assignment",
         "Kx92mQzR7v",
@@ -141,6 +149,10 @@ FALSE_POSITIVES = [
         "next run 2026-08-03T06:15:00Z.",
         id="iso-timestamp-list",
     ),
+    pytest.param(
+        "ox_runtime_policy_shadow_flags_override", id="ox-snake-case-name"
+    ),
+    pytest.param("ox_a3f9c1e07b52d84f6a0c9d3e1b7f2a48d5e6", id="ox-hex-digest"),
 ]
 
 
@@ -151,6 +163,79 @@ def test_false_positive_corpus_yields_no_findings(detector: Detector, text: str)
         f"expected no findings for {text!r}, got "
         f"{[(f.rule_id, text[f.start:f.end]) for f in findings]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# OX API keys: the shape questions the two corpora above cannot express.
+# ---------------------------------------------------------------------------
+
+# The one accepted length, differing only in the last character. The hyphen is
+# the one that matters: `-` is not a word character, so an earlier draft ending
+# the pattern in `\b` could not match a body that ended with one -- the engine
+# hunted for a boundary, could not find one and quietly gave up. It cost 7 keys
+# in 2000 random ones.
+OX_BODIES = [
+    "Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9m",
+    "Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-",
+    "Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9_",
+    "Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT99",
+]
+
+
+@pytest.mark.parametrize("body", OX_BODIES)
+def test_ox_api_key_is_found_whatever_the_body_ends_with(
+    detector: Detector, body: str
+) -> None:
+    text = f"ox_{body}"
+    spans = [
+        text[f.start : f.end] for f in detector.scan(text)
+        if f.rule_id == "safepaste-ox-api-key"
+    ]
+    assert spans == [text], f"body ending {body[-1]!r} was not matched whole"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "here it is: ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-, do not share",
+        '{"apiKey": "ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-"}',
+        "https://api.example.test/v1?key=ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-&page=2",
+    ],
+)
+def test_ox_api_key_span_excludes_whatever_delimits_it(
+    detector: Detector, text: str
+) -> None:
+    """The trailing delimiter is consumed by the match but must stay out of the
+    secret, or redaction would eat the comma, the quote or the `&`."""
+    key = "ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-"
+    found = [f for f in detector.scan(text) if f.rule_id == "safepaste-ox-api-key"]
+    assert found, f"no OX key found in {text!r}"
+    assert text[found[0].start : found[0].end] == key
+
+
+@pytest.mark.parametrize(
+    ("text", "why"),
+    [
+        ("box_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9m", "another vendor's prefix ends in ox_"),
+        ("my_ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9m", "mid-identifier, not a key"),
+        ("ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9", "35 characters: one short"),
+        ("ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9mn", "37 characters: one long"),
+        ("ox_" + "a" * 36, "no entropy at all"),
+    ],
+)
+def test_ox_api_key_does_not_fire_on_lookalikes(
+    detector: Detector, text: str, why: str
+) -> None:
+    fired = [f for f in detector.scan(text) if f.rule_id == "safepaste-ox-api-key"]
+    assert not fired, f"fired on {text!r} ({why})"
+
+
+def test_ox_api_key_label_reads_as_a_name(detector: Detector) -> None:
+    """What the dialog shows. `humanise` would say "Ox api key" unaided."""
+    text = "ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9m"
+    finding = next(f for f in detector.scan(text) if f.rule_id == "safepaste-ox-api-key")
+    assert finding.label == "OX API key"
+    assert finding.category == "api_keys"
 
 
 # ---------------------------------------------------------------------------

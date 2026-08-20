@@ -569,6 +569,7 @@ def test_the_tray_menu_matches_the_linux_one() -> None:
         "Pause 15 minutes",
         "Pause 1 hour",
         "Preferences…",
+        "About SafePaste",
         "Quit",
     ):
         assert expected in labels, f"{expected!r} missing from the Windows tray menu"
@@ -644,6 +645,7 @@ def test_menu_actions_resolve_to_the_right_callbacks() -> None:
         on_resume=lambda: calls.append(("resume",)),
         on_safe_paste=lambda: calls.append(("safe_paste",)),
         on_preferences=lambda: calls.append(("preferences",)),
+        on_about=lambda: calls.append(("about",)),
         on_quit=lambda: calls.append(("quit",)),
     )
     tray.set_state("redact", True)  # so Resume is present
@@ -654,6 +656,7 @@ def test_menu_actions_resolve_to_the_right_callbacks() -> None:
     assert ("pause", 900) in calls and ("pause", 3600) in calls
     assert ("resume",) in calls and ("safe_paste",) in calls
     assert ("preferences",) in calls and ("quit",) in calls
+    assert ("about",) in calls
 
 
 def test_missing_callbacks_do_not_crash_the_menu() -> None:

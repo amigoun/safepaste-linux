@@ -114,7 +114,8 @@ printing an import traceback.
 ## Usage
 
 - **Tray icon** — current state at a glance, plus mode switching, *Pause 15
-  minutes*, *Sanitise clipboard now*, Preferences and Quit.
+  minutes*, *Sanitise clipboard now*, Preferences, *About SafePaste* (which
+  opens this repository) and Quit.
 - **Ctrl+Alt+V** — sanitise whatever is on the clipboard right now, on demand.
 - **Preferences** — protection mode, how long *Restore original* stays available,
   the replacement text, and which categories of secret to look for.
@@ -129,10 +130,10 @@ $ echo "$SOMETHING" | safepaste redact - > clean.txt
 safepaste: redacted 1 secret(s) (40 chars replaced, 23 kept) [Generic API key]
 
 $ safepaste rules --stats
-total rules: 231
-  API keys 77 / Access tokens 135 / Passwords 10 / Private keys 2 /
+total rules: 232
+  API keys 78 / Access tokens 135 / Passwords 10 / Private keys 2 /
   Connection strings 4 / JWTs 2 / High entropy strings 1
-active by default: 230  opt-in: 1  vetoed: 0
+active by default: 231  opt-in: 1  vetoed: 0
 
 $ printf 'hunter2' | safepaste hash          # for hand-writing an exclusion
 f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c7
@@ -243,8 +244,9 @@ at a **pinned tag** (see `safepaste/detector/data/gitleaks.provenance.json` for
 the tag, digest and rule counts) plus SafePaste's own detectors for gaps that
 matter more on a clipboard than in a repository: database URLs with inline
 credentials, `Authorization:` headers as pasted from devtools, kubeconfig client
-keys and tokens, `.netrc` passwords, AWS session tokens, and plain password
-assignments.
+keys and tokens, `.netrc` passwords, AWS session tokens, plain password
+assignments, and OX Security API keys (`ox_…`, which upstream has no rule
+for and which nothing else here catches when pasted on their own).
 
 The pipeline order *is* the false-positive strategy: literal-keyword prefilter →
 regex → Shannon entropy → allowlists → your exclusions. So

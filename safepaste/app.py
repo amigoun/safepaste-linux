@@ -114,6 +114,7 @@ class SafePasteApp(Adw.Application):
                 on_resume=lambda: self._set_paused(False, 0),
                 on_safe_paste=lambda: self.daemon.safe_paste(),
                 on_preferences=self.show_preferences,
+                on_about=self.show_about,
                 on_quit=self.quit,
             )
             if self.tray is None:
@@ -274,6 +275,23 @@ class SafePasteApp(Adw.Application):
     def _on_prefs_closed(self, *_args) -> bool:
         self._prefs_window = None
         return False
+
+    # -- about -------------------------------------------------------------
+
+    def show_about(self) -> None:
+        """Open the project page in the browser.
+
+        Deliberately not an about *dialog*: the same menu item exists on macOS
+        and Windows, where the front end is `PollingShell` and there is no
+        toolkit to draw one with (its Preferences item is a notification saying
+        where the config file lives, for the same reason). A URL is the one
+        thing all three platforms can honour identically.
+        """
+        from .about import HOMEPAGE, open_url
+
+        if not open_url(HOMEPAGE):
+            # Nothing took the URL, so put it where it can at least be read.
+            self._notify_simple("SafePaste", HOMEPAGE)
 
     def _on_config_changed(self) -> None:
         config_mod.save(self.config)

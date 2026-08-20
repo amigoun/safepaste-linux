@@ -28,7 +28,7 @@
         "The CLI works without the daemon:",
         "    safepaste scan -      reads stdin, exits 1 if it finds a secret",
         "    safepaste redact -    writes the sanitised text to stdout",
-        "    safepaste rules       lists the 231 detectors",
+        "    safepaste rules       lists the 232 detectors",
         "",
         "Settings live in %APPDATA%\\SafePaste\\config.toml. Per-application policy",
         "is supported on Windows: see the [policy] section in the README.",

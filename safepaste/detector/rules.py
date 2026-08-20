@@ -94,6 +94,7 @@ _ACRONYMS = {
     "id": "ID",
     "jwt": "JWT",
     "oauth": "OAuth",
+    "ox": "OX",
     "pat": "PAT",
     "pem": "PEM",
     "pgp": "PGP",

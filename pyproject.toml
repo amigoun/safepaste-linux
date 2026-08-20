@@ -25,7 +25,7 @@ classifiers = [
 # Markers rather than extras, because the wrong platform's backend is never
 # importable anyway and a user should not have to know which name to ask for.
 #
-# `regex` is not optional: the detector runs 231 patterns written for Go's RE2,
+# `regex` is not optional: the detector runs 232 patterns written for Go's RE2,
 # and only `regex` offers the per-call timeout that keeps a pathological input
 # from hanging the daemon. The stdlib `re` has no such guard.
 #
