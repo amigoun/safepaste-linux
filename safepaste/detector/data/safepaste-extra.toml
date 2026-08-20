@@ -174,11 +174,19 @@ entropy = 1.8
 # Consuming one non-body character instead (or end-of-text) keeps the token
 # itself in group 1 while the delimiter stays outside it -- and it is also what
 # stops a 40-character token matching its first 36 and being half-redacted.
+#
+# The two classes are deliberately not the same, which looks like a typo and is
+# not. The body accepts all four of `- . _ ~` (the RFC 3986 unreserved set: two
+# specimens showed `-` and `~`, and 0.5.0 shipped without `~` and therefore
+# silently missed a real key). The delimiter class omits `.` so that a full stop
+# still ends a token -- with `.` in both classes, a key at the end of a sentence
+# matches nothing at all, because the exact `{36}` leaves the engine no way to
+# give the period back.
 [[rules]]
 id = "safepaste-ox-api-key"
 description = "OX Security API key"
 category = "api_keys"
-regex = '''\b(ox_[A-Za-z0-9_-]{36})(?:[^A-Za-z0-9_-]|$)'''
+regex = '''\b(ox_[A-Za-z0-9._~-]{36})(?:[^A-Za-z0-9_~-]|$)'''
 keywords = ["ox_"]
 # A backstop against low-diversity junk only (`ox_aaaa...`), not the main
 # filter. It cannot be the main filter, even at one fixed length: measured over
@@ -189,12 +197,12 @@ keywords = ["ox_"]
 entropy = 3.8
   [[rules.allowlists]]
   # What entropy could not do, case can. A body with no uppercase letter at all
-  # is a snake_case identifier or a hex digest, not a key: 36 random base64url
-  # characters missing every one of the 26 uppercase letters is about a
-  # 1-in-10^7 event, while `ox_runtime_policy_shadow_flags_override` is
-  # something a codebase genuinely contains.
+  # is a snake_case identifier or a hex digest, not a key: 36 characters drawn
+  # from the unreserved set while missing every one of the 26 uppercase letters
+  # is about a 1-in-10^7 event, while `ox_runtime_policy_shadow_flags_override`
+  # is something a codebase genuinely contains.
   regexes = [
-      '''^ox_[a-z0-9_]+$''',
+      '''^ox_[a-z0-9._~-]+$''',
   ]
 
 # --------------------------------------------------------------------------

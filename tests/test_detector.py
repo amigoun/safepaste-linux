@@ -89,6 +89,14 @@ TRUE_POSITIVES = [
         id="netrc-password",
     ),
     pytest.param(
+        # A tilde in the body. 0.5.0 shipped with a base64url character class and
+        # was therefore silently quiet on a real key shaped like this one.
+        "ox_Kj83hDbQmZpLxNc9Rst~1uW4yA7zE2qXbT9m",
+        "safepaste-ox-api-key",
+        "ox_Kj83hDbQmZpLxNc9Rst~1uW4yA7zE2qXbT9m",
+        id="ox-api-key-with-a-tilde",
+    ),
+    pytest.param(
         # Bare, with no `KEY=` around it -- which is how one of these arrives
         # in a chat window, and what nothing in the vendored set catches.
         "ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-",
@@ -152,6 +160,9 @@ FALSE_POSITIVES = [
     pytest.param(
         "ox_runtime_policy_shadow_flags_override", id="ox-snake-case-name"
     ),
+    pytest.param(
+        "ox_runtime.policy.shadow.flags.override", id="ox-dotted-name"
+    ),
     pytest.param("ox_a3f9c1e07b52d84f6a0c9d3e1b7f2a48d5e6", id="ox-hex-digest"),
 ]
 
@@ -200,6 +211,10 @@ def test_ox_api_key_is_found_whatever_the_body_ends_with(
         "here it is: ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-, do not share",
         '{"apiKey": "ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-"}',
         "https://api.example.test/v1?key=ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-&page=2",
+        # A sentence ending in the key. This is why the delimiter class omits `.`
+        # while the body accepts it: with `.` in both, the exact {36} leaves the
+        # engine no way to hand the full stop back, and the key goes undetected.
+        "the key is ox_Kj83hDbQmZpLxNc9RstV1uW4yA7zE2qXbT9-.",
     ],
 )
 def test_ox_api_key_span_excludes_whatever_delimits_it(
@@ -211,6 +226,26 @@ def test_ox_api_key_span_excludes_whatever_delimits_it(
     found = [f for f in detector.scan(text) if f.rule_id == "safepaste-ox-api-key"]
     assert found, f"no OX key found in {text!r}"
     assert text[found[0].start : found[0].end] == key
+
+
+@pytest.mark.parametrize("char", ["-", ".", "_", "~"])
+def test_ox_api_key_takes_the_whole_unreserved_set_inside_the_body(
+    detector: Detector, char: str
+) -> None:
+    """`- . _ ~` are all RFC 3986 unreserved characters, and keys use them.
+
+    0.5.0 accepted only `[A-Za-z0-9_-]`, so a key carrying a tilde matched nothing
+    -- found by copying a real one, not by a test, which is why all four are pinned
+    here now.
+    """
+    text = "ox_Kj83hDbQmZpLxNc9Rst" + char + "1uW4yA7zE2qXbT9m"
+    assert len(text) - 3 == 36, "fixture must be exactly one body length"
+    spans = [
+        text[f.start : f.end]
+        for f in detector.scan(text)
+        if f.rule_id == "safepaste-ox-api-key"
+    ]
+    assert spans == [text], f"a body containing {char!r} was not matched whole"
 
 
 @pytest.mark.parametrize(
