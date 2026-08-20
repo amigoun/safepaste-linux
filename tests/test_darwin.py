@@ -547,6 +547,7 @@ def test_the_macos_menu_matches_the_other_platforms() -> None:
         "Pause 15 minutes",
         "Pause 1 hour",
         "Preferences…",
+        "About SafePaste",
     ):
         assert expected in labels
     # The one deliberate difference: Mac convention names the application in Quit.
@@ -598,6 +599,7 @@ def test_macos_menu_actions_resolve() -> None:
         on_resume=lambda: calls.append(("resume",)),
         on_safe_paste=lambda: calls.append(("safe_paste",)),
         on_preferences=lambda: calls.append(("preferences",)),
+        on_about=lambda: calls.append(("about",)),
         on_quit=lambda: calls.append(("quit",)),
     )
     tray.set_state("redact", True)
@@ -606,6 +608,7 @@ def test_macos_menu_actions_resolve() -> None:
             tray._resolve(kind, attrs)()
     assert ("mode", "redact") in calls and ("pause", 3600) in calls
     assert ("resume",) in calls and ("quit",) in calls
+    assert ("about",) in calls
 
 
 def test_a_run_loop_that_never_started_pumps_harmlessly() -> None:

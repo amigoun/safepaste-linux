@@ -109,7 +109,26 @@ def test_the_menu_contains_the_expected_actions(tray: TrayIndicator) -> None:
     assert "Protection" in labels
     assert "Pause 15 minutes" in labels
     assert "Preferences…" in labels
+    assert "About SafePaste" in labels
     assert "Quit" in labels
+
+
+def test_clicking_about_fires_the_about_callback() -> None:
+    """The item is looked up by its label and fired by the id found there.
+
+    Present-in-the-layout and wired-to-something are different claims, and About
+    is the item where the second one is the whole point: a label with no action
+    behind it looks perfectly correct in every GetLayout dump.
+    """
+    fired: list[str] = []
+    tray = TrayIndicator(on_about=lambda: fired.append("about"))
+    node = next(
+        c
+        for c in tray._build_tree()["children"]
+        if c["props"].get("label") == "About SafePaste"
+    )
+    tray._fire_action(node["id"])
+    assert fired == ["about"]
 
 
 def test_the_protection_submenu_offers_every_mode(tray: TrayIndicator) -> None:

@@ -114,7 +114,8 @@ printing an import traceback.
 ## Usage
 
 - **Tray icon** — current state at a glance, plus mode switching, *Pause 15
-  minutes*, *Sanitise clipboard now*, Preferences and Quit.
+  minutes*, *Sanitise clipboard now*, Preferences, *About SafePaste* (which
+  opens this repository) and Quit.
 - **Ctrl+Alt+V** — sanitise whatever is on the clipboard right now, on demand.
 - **Preferences** — protection mode, how long *Restore original* stays available,
   the replacement text, and which categories of secret to look for.

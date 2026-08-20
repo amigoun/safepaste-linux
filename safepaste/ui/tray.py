@@ -236,6 +236,11 @@ class TrayIndicator:
     _ID_SEP_3 = 13
     _ID_PREFERENCES = 14
     _ID_QUIT = 15
+    # Appended rather than slotted in next to Preferences, where it sits in
+    # the menu: the numbers are an implementation detail, but leaving the
+    # existing ones put means a GetLayout capture taken from an older build
+    # still lines up against a new one when comparing the two by hand.
+    _ID_ABOUT = 16
 
     def __init__(
         self,
@@ -245,6 +250,7 @@ class TrayIndicator:
         on_resume: Callable[[], None] | None = None,
         on_safe_paste: Callable[[], None] | None = None,
         on_preferences: Callable[[], None] | None = None,
+        on_about: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
     ) -> None:
         self._on_mode = on_mode
@@ -252,6 +258,7 @@ class TrayIndicator:
         self._on_resume = on_resume
         self._on_safe_paste = on_safe_paste
         self._on_preferences = on_preferences
+        self._on_about = on_about
         self._on_quit = on_quit
 
         # Rendered state. `set_state` is the only way these two change;
@@ -293,6 +300,7 @@ class TrayIndicator:
             self._ID_PAUSE_60: self._bound(self._on_pause, 3600),
             self._ID_RESUME: self._bound(self._on_resume),
             self._ID_PREFERENCES: self._bound(self._on_preferences),
+            self._ID_ABOUT: self._bound(self._on_about),
             self._ID_QUIT: self._bound(self._on_quit),
         }
         for index, mode in enumerate(MODES):
@@ -783,6 +791,11 @@ class TrayIndicator:
                 {
                     "id": self._ID_PREFERENCES,
                     "props": {"label": "Preferences…"},
+                    "children": [],
+                },
+                {
+                    "id": self._ID_ABOUT,
+                    "props": {"label": "About SafePaste"},
                     "children": [],
                 },
                 {"id": self._ID_QUIT, "props": {"label": "Quit"}, "children": []},

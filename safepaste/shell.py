@@ -167,6 +167,7 @@ class PollingShell:
             on_resume=lambda: self._set_paused(False, 0),
             on_safe_paste=self.guard.safe_paste,
             on_preferences=self._show_preferences,
+            on_about=self._show_about,
             on_quit=self.stop,
         )
         if tray is not None and tray.start():
@@ -202,6 +203,13 @@ class PollingShell:
             "SafePaste settings",
             f"Edit {cfg.CONFIG_FILE} and the daemon will pick it up on restart.",
         )
+
+    def _show_about(self) -> None:
+        """Open the project page, or say where it is if nothing can."""
+        from .about import HOMEPAGE, open_homepage
+
+        if not open_homepage():
+            self.notify("SafePaste", HOMEPAGE)
 
     def run(self) -> int:
         if not self.guard.start():
