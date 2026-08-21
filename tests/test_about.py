@@ -1,10 +1,10 @@
 """Tests for safepaste.about: the project URL, and how it gets opened.
 
-Nothing here may actually launch a browser, so every test replaces both
-openers. `_open_with_gio` exists as its own function largely for that reason:
-`Gio.AppInfo.launch_default_for_uri` is reached through a GI class that is
-awkward to stub, and a test that failed to stub it would open a real window on
-the developer's desktop rather than fail.
+Nothing here may open a real browser, and that is enforced rather than trusted:
+`no_openers` is autouse, so a test that forgets to stub one of the three
+mechanisms still cannot reach the session. Without it, adding the portal path
+made the existing tests fire real `OpenURI` requests and spray tabs across the
+desktop -- which is how this fixture came to exist.
 """
 
 from __future__ import annotations
@@ -15,6 +15,14 @@ import tomllib
 import pytest
 
 from safepaste import about
+
+
+@pytest.fixture(autouse=True)
+def no_openers(monkeypatch):
+    """Every mechanism refuses by default; a test opts one back in."""
+    monkeypatch.setattr(about, "_open_with_portal", lambda _url: False)
+    monkeypatch.setattr(about, "_open_with_gio", lambda _url: False)
+    monkeypatch.setattr("webbrowser.open", lambda _url: False)
 
 
 def test_the_homepage_matches_the_packaging_metadata() -> None:
@@ -30,31 +38,47 @@ def test_the_homepage_matches_the_packaging_metadata() -> None:
     assert about.HOMEPAGE == pyproject["project"]["urls"]["Homepage"]
 
 
-def test_gio_opening_the_url_is_the_end_of_it(monkeypatch) -> None:
+def test_the_portal_is_tried_first_and_ends_it(monkeypatch) -> None:
+    """Order matters, not just coverage.
+
+    The portal is first because the daemon's unit sets NoNewPrivileges, and a
+    browser spawned as its child inherits that and dies -- Chrome's SUID sandbox
+    helper aborts. If a refactor ever reorders these, About silently does nothing
+    again under systemd, which is exactly the bug this encodes.
+    """
     tried: list[str] = []
-    monkeypatch.setattr(about, "_open_with_gio", lambda url: tried.append(url) or True)
+    monkeypatch.setattr(about, "_open_with_portal", lambda url: tried.append(url) or True)
     monkeypatch.setattr(
-        "webbrowser.open",
-        lambda *a, **k: pytest.fail("webbrowser must not be reached"),
+        about, "_open_with_gio", lambda _url: pytest.fail("Gio must not be reached")
+    )
+    monkeypatch.setattr(
+        "webbrowser.open", lambda _url: pytest.fail("webbrowser must not be reached")
     )
     assert about.open_url("https://example.invalid/x") is True
     assert tried == ["https://example.invalid/x"]
 
 
-def test_webbrowser_is_the_fallback_when_gio_declines(monkeypatch) -> None:
-    """The case a systemd user unit lands in: no GLib handler, browser instead."""
-    opened: list[str] = []
-    monkeypatch.setattr(about, "_open_with_gio", lambda _url: False)
-    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
+def test_gio_is_the_second_choice(monkeypatch) -> None:
+    """No portal -- a plain X session, a minimal container."""
+    tried: list[str] = []
+    monkeypatch.setattr(about, "_open_with_gio", lambda url: tried.append(url) or True)
+    monkeypatch.setattr(
+        "webbrowser.open", lambda _url: pytest.fail("webbrowser must not be reached")
+    )
     assert about.open_url("https://example.invalid/y") is True
-    assert opened == ["https://example.invalid/y"]
+    assert tried == ["https://example.invalid/y"]
 
 
-def test_open_url_reports_failure_rather_than_pretending(monkeypatch) -> None:
+def test_webbrowser_is_the_last_resort(monkeypatch) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
+    assert about.open_url("https://example.invalid/z") is True
+    assert opened == ["https://example.invalid/z"]
+
+
+def test_open_url_reports_failure_rather_than_pretending() -> None:
     """False is load-bearing: it is what makes the front ends show the URL."""
-    monkeypatch.setattr(about, "_open_with_gio", lambda _url: False)
-    monkeypatch.setattr("webbrowser.open", lambda _url: False)
-    assert about.open_url("https://example.invalid/z") is False
+    assert about.open_url("https://example.invalid/w") is False
 
 
 def test_open_homepage_opens_the_homepage(monkeypatch) -> None:
