@@ -13,8 +13,13 @@ delivers a SetSelectionOwnerNotify for every change — including changes made b
 Wayland-native applications. scripts/probe-clipboard.py verifies all of that on
 the running desktop; run it if this ever appears to stop working.
 
-Reading the bytes is delegated to `wl-paste`, which already implements the
-selection handshake including INCR for large transfers.
+Reading the bytes used to be delegated to `wl-paste`. It no longer is, because
+on Mutter every `wl-paste` invocation maps and focuses a 1x1 window to get around
+the focus gating — two of them per copy, which flickers the screen and, when the
+focus grab loses its race, silently skips the scan. `safepaste.clipboard.x11`
+reads the same bytes off the same XWayland bridge with no window on screen; see
+that module for the measurements. `WlPasteReader` stays as the fallback, so a
+failed X11 read costs a flicker rather than a missed secret.
 """
 
 from __future__ import annotations
@@ -28,17 +33,13 @@ from dataclasses import dataclass, field
 from gi.repository import GLib
 
 from ..backend import ClipboardEvent, content_hash
+from .x11 import TEXT_TARGET_PREFERENCE, X11SelectionReader, has_rich_targets
 
 log = logging.getLogger(__name__)
 
-# Text flavours we are willing to scan, best first.
-TEXT_MIME_PREFERENCE = (
-    "text/plain;charset=utf-8",
-    "UTF8_STRING",
-    "text/plain",
-    "STRING",
-    "TEXT",
-)
+# Text flavours we are willing to scan, best first. Shared with the X11 reader:
+# two copies of this list would eventually disagree about which flavour wins.
+TEXT_MIME_PREFERENCE = TEXT_TARGET_PREFERENCE
 
 # How long a value we wrote ourselves stays recognised as ours. Generous on
 # purpose: this is a correctness mechanism, not a performance one, and the cost
@@ -54,11 +55,13 @@ def _has_rich_flavours(types: list[str]) -> bool:
     Lives here rather than on ClipboardEvent because it is entirely a statement
     about *MIME* naming. A macOS backend answers the same question about UTIs, and
     portable code must never parse either.
+
+    `wl-paste --list-types` reports the ICCCM meta-target `TARGETS` alongside the
+    real flavours, and an unrecognised name would otherwise read as "a richer
+    representation we are about to destroy" -- which made the dialog claim
+    formatting was lost on clipboards holding nothing but plain text.
     """
-    return any(
-        t not in TEXT_MIME_PREFERENCE and not t.startswith("text/plain")
-        for t in types
-    )
+    return has_rich_targets(types)
 
 
 @dataclass
@@ -89,8 +92,13 @@ class _OwnWrites:
             del self.seen[digest]
 
 
-class ClipboardReader:
-    """One-shot clipboard reads via wl-clipboard."""
+class WlPasteReader:
+    """One-shot clipboard reads via wl-clipboard.
+
+    Kept only as the fallback behind `X11SelectionReader`. Every call maps and
+    focuses a window on Mutter, so it is the flicker; using it is strictly better
+    than not reading the clipboard at all, and strictly worse than the X11 path.
+    """
 
     def list_types(self) -> list[str]:
         try:
@@ -139,16 +147,58 @@ class ClipboardReader:
         )
 
 
+class FallbackReader:
+    """The flicker-free read, with the old one behind it.
+
+    The ordering is a safety decision, not a preference. A read that fails is
+    reported by `read_text` as None, which the monitor cannot distinguish from a
+    clipboard holding no text -- so before this existed, a failed read meant a
+    copy nobody scanned. `X11SelectionReader.last_error` separates the two, and
+    only a genuine failure reaches `wl-paste`.
+    """
+
+    def __init__(
+        self,
+        primary: X11SelectionReader | None = None,
+        fallback: WlPasteReader | None = None,
+    ) -> None:
+        self.primary = primary if primary is not None else X11SelectionReader()
+        self.fallback = fallback if fallback is not None else WlPasteReader()
+
+    def list_types(self) -> list[str]:
+        types = self.primary.list_types()
+        if types or self.primary.last_error is None:
+            return types
+        log.warning(
+            "X11 clipboard read failed (%s); falling back to wl-paste",
+            self.primary.last_error,
+        )
+        return self.fallback.list_types()
+
+    def close(self) -> None:
+        self.primary.close()
+
+    def read_text(self) -> ClipboardEvent | None:
+        event = self.primary.read_text()
+        if event is not None or self.primary.last_error is None:
+            return event
+        log.warning(
+            "X11 clipboard read failed (%s); falling back to wl-paste",
+            self.primary.last_error,
+        )
+        return self.fallback.read_text()
+
+
 class XFixesMonitor:
     """Event-driven clipboard watcher, wired into the GLib main loop."""
 
     def __init__(
         self,
         on_change: Callable[[ClipboardEvent], None],
-        reader: ClipboardReader | None = None,
+        reader: object | None = None,
     ) -> None:
         self.on_change = on_change
-        self.reader = reader or ClipboardReader()
+        self.reader = reader if reader is not None else FallbackReader()
         self.own_writes = _OwnWrites()
         # Set by Guard; see ClipboardMonitor.should_read.
         self.should_read = None
@@ -201,6 +251,11 @@ class XFixesMonitor:
         return True
 
     def stop(self) -> None:
+        # The reader holds its own X connection, deliberately separate from the
+        # one below; nothing else will close it.
+        close = getattr(self.reader, "close", None)
+        if callable(close):
+            close()
         if self._watch_id is not None:
             GLib.source_remove(self._watch_id)
             self._watch_id = None
