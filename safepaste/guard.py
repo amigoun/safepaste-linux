@@ -111,10 +111,40 @@ class Guard:
         GNOME/Wayland it blocks for a full 2s timeout while the screen is locked.
         Measured on a real desktop: the lock was known three seconds before each
         wasted read. So the question has to be asked before the read, not after.
+
+        The ownership case is not an optimisation but a deadlock guard. Where the
+        writer holds the clipboard itself, it answers conversion requests from
+        this same main loop -- so reading here would block waiting for an answer
+        only this thread can give. Skipping is also simply correct: a value we
+        are serving is a value we wrote, which `note_own_write` would discard
+        anyway.
         """
         if self.config.mode == "off" or self.paused:
             return False
+        if self._writer_holds_clipboard():
+            log.debug("skipping the read; we are serving this value ourselves")
+            return False
         return not self.locked
+
+    def _writer_holds_clipboard(self) -> bool:
+        owns = getattr(self.writer, "owns_clipboard", None)
+        return bool(owns()) if callable(owns) else False
+
+    def _read_clipboard(self) -> ClipboardEvent | None:
+        """The clipboard as an event, from wherever it can be had without blocking.
+
+        When the writer is serving the value, ask it rather than the X server:
+        going out for something this process is holding would deadlock on itself.
+        This matters beyond the deadlock, too -- a restored original is a value we
+        serve, and `safe_paste` on it must see the secret, not an empty read.
+        """
+        held = None
+        current = getattr(self.writer, "current_text", None)
+        if callable(current):
+            held = current()
+        if held is not None:
+            return ClipboardEvent.of(held)
+        return self.monitor.reader.read_text()
 
     # -- setup -------------------------------------------------------------
 
@@ -172,6 +202,12 @@ class Guard:
             self._injector.close()
             self._injector = None
         self.monitor.stop()
+        # A writer may be holding the selection on our behalf; on Linux the X
+        # connection and its main-loop watch belong to it. Shutdown-only, so
+        # dropping the clipboard here is the same thing that exiting would do.
+        close = getattr(self.writer, "close", None)
+        if callable(close):
+            close()
         self.forget_original()
 
     # -- the pipeline ------------------------------------------------------
@@ -243,7 +279,7 @@ class Guard:
                 "safe paste ignored: policy for %s is 'off'", identity or "this target"
             )
             return 0
-        event = self.monitor.reader.read_text()
+        event = self._read_clipboard()
         if event is None:
             return 0
         findings = self.detector.scan(event.text)

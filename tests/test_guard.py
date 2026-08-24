@@ -327,3 +327,85 @@ def test_exclusions_store_digests_never_plaintext(guard_factory) -> None:
 def test_excluding_with_nothing_detected_is_a_no_op(guard_factory) -> None:
     guard, _, _ = guard_factory(mode="redact")
     assert guard.exclude_last_value() is False
+
+
+# --- reading a value we are serving ourselves ------------------------------
+#
+# On Linux the writer can hold the clipboard itself and answer conversion
+# requests from the main loop. Anything that blocks that loop waiting for an
+# answer waits for itself. These pin the two places that must not.
+
+
+class OwningWriter(FakeWriter):
+    """A writer that holds the clipboard, as the X11 selection owner does."""
+
+    def __init__(self, succeed: bool = True) -> None:
+        super().__init__(succeed)
+        self.held: str | None = None
+        self.owns_queries = 0
+
+    def write(self, text: str) -> bool:
+        ok = super().write(text)
+        if ok:
+            self.held = text
+        return ok
+
+    def owns_clipboard(self) -> bool:
+        self.owns_queries += 1
+        return self.held is not None
+
+    def current_text(self) -> str | None:
+        return self.held
+
+
+def test_no_clipboard_read_while_we_are_serving_the_value(guard_factory) -> None:
+    """Reading here would block the loop that has to answer the read."""
+    guard, backend, _ = guard_factory()
+    owning = OwningWriter()
+    guard.writer = owning
+    assert guard._wants_clipboard() is True, "nothing held yet, so reading is fine"
+    owning.write("something we now serve")
+    assert guard._wants_clipboard() is False
+    assert owning.owns_queries > 0
+
+
+def test_a_value_we_serve_is_read_from_the_writer_not_the_x_server(
+    guard_factory,
+) -> None:
+    guard, backend, _ = guard_factory()
+    owning = OwningWriter()
+    guard.writer = owning
+    backend.reader.event = ClipboardEvent.of("what the X server would say")
+    owning.write("what we are actually serving")
+    event = guard._read_clipboard()
+    assert event is not None
+    assert event.text == "what we are actually serving"
+
+
+def test_safe_paste_on_a_restored_original_still_finds_the_secret(
+    guard_factory,
+) -> None:
+    """The case that makes the held value load-bearing rather than an optimisation.
+
+    "Restore original" puts the secret back, and we are the ones serving it. If
+    safe_paste read through the X server it would deadlock; if it skipped the
+    read because we own the clipboard it would report a clean clipboard. It has
+    to ask the writer what it is holding.
+    """
+    guard, backend, _ = guard_factory()
+    owning = OwningWriter()
+    guard.writer = owning
+    backend.reader.event = None  # the X server would answer nothing, or hang
+    owning.write(PAYLOAD)  # the restored original, secret and all
+    assert guard.safe_paste() > 0, "the secret in the restored original must be found"
+    assert SECRET not in owning.held
+    assert "REDACTED" in owning.held
+
+
+def test_a_writer_that_holds_nothing_still_reads_normally(guard_factory) -> None:
+    """The macOS and Windows writers have no such notion; nothing may assume it."""
+    guard, backend, _ = guard_factory()
+    backend.reader.event = ClipboardEvent.of(PAYLOAD)
+    assert guard._wants_clipboard() is True
+    event = guard._read_clipboard()
+    assert event is not None and event.text == PAYLOAD

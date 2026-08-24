@@ -1,15 +1,22 @@
 """Putting text back on the clipboard.
 
-Writes go through `wl-copy` rather than X11. Setting the Wayland selection is the
-authoritative direction — Mutter mirrors it out to XWayland, so both native and
-X11 applications see the result — whereas taking the X11 selection and hoping the
-bridge propagates it inward is the long way round.
+Writes no longer go through `wl-copy` by default. They used to, on the reasoning
+that setting the Wayland selection is the authoritative direction and letting
+Mutter mirror it out to XWayland beats taking the X11 selection and hoping the
+bridge propagates it inward. The bridge does propagate it inward -- measured
+byte-exact at sizes from 1 KB to 5 MB -- and the round trip through Wayland costs
+a mapped, focused window on every redaction, because that is the only way
+`wl-copy` can set the selection on Mutter. `safepaste.clipboard.x11write` owns the
+X11 selection directly instead; see that module for the measurements and for the
+two behaviour changes it brings.
 
-Known limitation, surfaced in the UI rather than hidden: `wl-copy` offers a single
-MIME type per invocation, so replacing a rich clipboard with redacted text drops
-the `text/html` flavour and any application-private ones. Safety wins here, but
-the dialog says so plainly. Serving several flavours needs a resident selection
-source of our own, which is a later change.
+`WlCopyWriter` stays as the fallback, so failing to take the selection costs a
+flicker rather than leaving a secret on the clipboard.
+
+Known limitation, unchanged and still surfaced in the UI rather than hidden:
+replacing a rich clipboard with redacted text drops the `text/html` flavour and
+any application-private ones. Owning the selection means we could offer several
+flavours now, but the only thing there is to offer is redacted plain text.
 """
 
 from __future__ import annotations
@@ -60,7 +67,14 @@ def _run_wl_copy(args: list[str], payload: bytes | None) -> tuple[bool, str]:
     return True, ""
 
 
-class ClipboardWriter:
+class WlCopyWriter:
+    """Writes by handing the value to a resident `wl-copy`.
+
+    Kept as the fallback behind `X11SelectionOwner`. Every call maps and focuses
+    a window on Mutter, so it is the flicker; using it is strictly better than
+    leaving a secret on the clipboard.
+    """
+
     def __init__(self, mime: str = DEFAULT_MIME) -> None:
         self.mime = mime
 
@@ -82,3 +96,50 @@ class ClipboardWriter:
         if not ok:
             log.error("clipboard clear failed: %s", detail)
         return ok
+
+
+class FallbackWriter:
+    """Own the selection ourselves; hand off to `wl-copy` only if that fails.
+
+    The ordering is a safety decision. A write that does not happen leaves the
+    secret sitting on the clipboard, which is the one outcome this program exists
+    to prevent -- so the flickering path stays reachable, and is reached only when
+    the quiet one could not take the selection.
+    """
+
+    def __init__(self, primary=None, fallback=None) -> None:
+        if primary is None:
+            from .x11write import X11SelectionOwner
+
+            primary = X11SelectionOwner()
+        self.primary = primary
+        self.fallback = fallback if fallback is not None else WlCopyWriter()
+
+    def write(self, text: str) -> bool:
+        if self.primary.write(text):
+            return True
+        log.warning(
+            "could not own the clipboard (%s); falling back to wl-copy",
+            self.primary.last_error,
+        )
+        return self.fallback.write(text)
+
+    def clear(self) -> bool:
+        # Both, deliberately: whichever of them last held the value, the point of
+        # clear() is that nothing is left holding it.
+        ours = self.primary.clear()
+        theirs = self.fallback.clear()
+        return ours and theirs
+
+    def owns_clipboard(self) -> bool:
+        owns = getattr(self.primary, "owns_clipboard", None)
+        return bool(owns()) if callable(owns) else False
+
+    def current_text(self) -> str | None:
+        current = getattr(self.primary, "current_text", None)
+        return current() if callable(current) else None
+
+    def close(self) -> None:
+        close = getattr(self.primary, "close", None)
+        if callable(close):
+            close()

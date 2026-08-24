@@ -74,9 +74,9 @@ class LinuxBackend(Backend):
         return XFixesMonitor(on_change=on_change)
 
     def clipboard_writer(self) -> ClipboardWriter:
-        from ..clipboard.writer import ClipboardWriter as WlClipboardWriter
+        from ..clipboard.writer import FallbackWriter
 
-        return WlClipboardWriter()
+        return FallbackWriter()
 
     # -- optional ----------------------------------------------------------
 
