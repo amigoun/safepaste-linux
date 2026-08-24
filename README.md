@@ -174,15 +174,51 @@ Also note the X11 selection owner is permanently Mutter's XWayland proxy window
 and never changes, so a polling fallback has to hash content — watching the owner
 id will never fire.
 
-**Writes go out through `wl-copy`**, the authoritative direction; Mutter mirrors
-them back to X11.
+**Reads and writes both stay on the X11 side, and that is a deliberate reversal.**
+Both used to shell out to wl-clipboard. On Mutter, neither `wl-paste` nor
+`wl-copy` can touch the clipboard without keyboard focus, and the way they get it
+is to create a 1x1 `xdg_toplevel`, attach a real buffer and call
+`gtk_surface1.present()` — a genuine window, mapped and focused, for every single
+call. Two per copy for reading, one more per redaction. That is visible as a
+screen flicker and a focus bounce, and when the focus grab loses its race the
+read simply times out: one desktop's journal held 65 `wl-paste --list-types`
+timeouts in eleven days, each of them a copy that was never scanned.
+
+X11 gates none of this. A selection read needs a window only as a mailbox for
+`SelectionNotify`, and owning a selection needs one only as an address; an
+**unmapped** window does both, so nothing is drawn and nothing takes focus.
+SafePaste reads the selection directly (`safepaste/clipboard/x11.py`) and owns it
+directly (`safepaste/clipboard/x11write.py`), over the same XWayland bridge it
+already watches. wl-clipboard remains installed and is still used, but only as a
+fallback when the X11 path fails — a flicker beats a missed secret.
+
+Measured on GNOME 46: a full read takes 7.6–16.1 ms against ~40 ms for the
+`wl-paste` pair it replaces, and 2000 ms when that pair timed out; a copy now maps
+zero windows where it used to map two, and a redaction zero where it used to map
+one. Values are read with INCR and written as chunked `PropModeAppend` — a
+`ChangeProperty` request caps at 262,140 bytes here but a property does not, and
+the requestor is only told to look once the last chunk has landed. Round-tripped
+byte-exact at 1 KB, 250 KB, 1 MiB and 5 MB, verified both by an X11 requestor and
+through Mutter's bridge to `wl-paste`.
+
+One trap, and it is not obvious: **whatever holds the selection answers requests
+from the main loop, so nothing on that loop may block waiting to read it.** Doing
+so waits for itself — the read times out, and then the wl-clipboard fallback times
+out too, because Mutter's bridge is asking the very process that is blocked.
+`Guard._wants_clipboard` skips the read while we are serving the value, and
+`Guard._read_clipboard` takes it from the writer instead.
 
 ### Known limitations, stated plainly
 
-- **Rich formatting is dropped when redacting.** `wl-copy` serves one MIME type
-  per invocation, so replacing a selection that carried `text/html` leaves plain
-  text only. Safety wins, and the dialog says so. Serving several flavours needs a
-  resident selection source of our own.
+- **Rich formatting is dropped when redacting.** Replacing a selection that
+  carried `text/html` leaves plain text only. Safety wins, and the dialog says so.
+  Owning the selection means SafePaste *could* now offer several flavours, but the
+  only thing it has to offer is redacted plain text; there is no HTML to rebuild.
+- **A redacted clipboard does not outlive the daemon.** SafePaste serves the value
+  itself rather than handing it to a `wl-copy` that stays resident, so if the
+  daemon exits before you paste, the clipboard is empty rather than holding the
+  redaction. Safe — the secret is not what is left behind — but it is a change
+  from earlier versions.
 - **Nothing happens while the screen is locked.** wl-clipboard has no
   clipboard-management protocol available, so it falls back to creating a surface
   and waiting for keyboard focus — which the lock screen never yields. `wl-copy`
@@ -298,7 +334,7 @@ stubs that pretend.
 |---|---|---|---|
 | Clipboard monitoring | XFIXES via XWayland | `NSPasteboard.changeCount` | `GetClipboardSequenceNumber` + format listener |
 | Redaction | ✓ | ✓ | ✓ |
-| **Rich formatting preserved** | ✗ `wl-copy` is one MIME type per call | ✓ multi-representation writes | ✗ plain formats only; `CF_HTML` carries byte offsets that a redaction invalidates |
+| **Rich formatting preserved** | ✗ only redacted plain text to offer | ✓ multi-representation writes | ✗ plain formats only; `CF_HTML` carries byte offsets that a redaction invalidates |
 | Notifications | ✓ GNOME notifications | ✓ `osascript` | logs only — a balloon needs the tray window, which now exists |
 | Tray icon | ✓ hand-rolled StatusNotifierItem | ✓ `NSStatusItem` | ✓ `Shell_NotifyIcon` |
 | Global hotkey | ✓ `Ctrl+Alt+V` via gsettings | ✓ via Carbon `RegisterEventHotKey` | ✓ via `RegisterHotKey` |
