@@ -20,6 +20,13 @@ focus grab loses its race, silently skips the scan. `safepaste.clipboard.x11`
 reads the same bytes off the same XWayland bridge with no window on screen; see
 that module for the measurements. `WlPasteReader` stays as the fallback, so a
 failed X11 read costs a flicker rather than a missed secret.
+
+`gi` is imported inside the two methods that touch the main loop rather than at
+module scope, and that is load-bearing rather than tidy. The detection library
+is deliberately free of any GTK import so the suite runs on a bare runner, and
+the macOS and Windows CI jobs install nothing but `regex` and `pytest` — a
+module-level `from gi.repository import GLib` here fails collection on both the
+moment anything under tests/ imports this file.
 """
 
 from __future__ import annotations
@@ -29,8 +36,6 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-
-from gi.repository import GLib
 
 from ..backend import ClipboardEvent, content_hash
 from .x11 import TEXT_TARGET_PREFERENCE, X11SelectionReader, has_rich_targets
@@ -240,6 +245,8 @@ class XFixesMonitor:
         # (type, sub_code) pair the display exposes instead.
         self._owner_notify = tuple(self._display.extension_event.SetSelectionOwnerNotify)
 
+        from gi.repository import GLib
+
         self._watch_id = GLib.unix_fd_add_full(
             GLib.PRIORITY_DEFAULT,
             self._display.fileno(),
@@ -257,6 +264,8 @@ class XFixesMonitor:
         if callable(close):
             close()
         if self._watch_id is not None:
+            from gi.repository import GLib
+
             GLib.source_remove(self._watch_id)
             self._watch_id = None
         if self._display is not None:
@@ -274,7 +283,7 @@ class XFixesMonitor:
 
     # -- event plumbing ----------------------------------------------------
 
-    def _on_fd_ready(self, fd: int, condition: GLib.IOCondition, _data) -> bool:
+    def _on_fd_ready(self, fd: int, condition, _data) -> bool:
         if self._display is None:
             return False
         try:
