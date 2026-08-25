@@ -18,7 +18,29 @@ case "$1" in
         # exist, root has no route to that user's D-Bus session bus or
         # Wayland display. There is nothing for `systemctl --user` to reach
         # from inside a maintainer script.
-        cat <<'EOF'
+        # $2 is the previously configured version, which dpkg passes only on an
+        # upgrade. A fresh install needs to be told how to start; an upgrade
+        # needs the opposite -- that a copy is already running, and will keep
+        # running the old code until it is restarted.
+        if [ -n "$2" ]; then
+            cat <<'EOF'
+
+SafePaste upgraded.
+
+A copy already running keeps the old code until it restarts, and systemd
+re-reads safepaste.service only after a daemon-reload -- so a restart alone
+leaves any new limits in the unit (LimitMEMLOCK, LimitCORE) unapplied. Both
+matter: the memory lock that keeps a retained clipboard value out of swap is
+refused when the ceiling is too low, and it says so in the journal.
+
+Run this as yourself (not root):
+
+    systemctl --user daemon-reload
+    systemctl --user restart safepaste.service
+
+EOF
+        else
+            cat <<'EOF'
 
 SafePaste installed.
 
@@ -35,6 +57,7 @@ To bind Ctrl+Alt+V for on-demand sanitising, run this as yourself:
     python3 -m safepaste.hotkey install
 
 EOF
+        fi
         ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)
