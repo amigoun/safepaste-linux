@@ -27,7 +27,7 @@ import sys
 import textwrap
 from collections import Counter
 
-from . import config as config_mod
+from . import config as config_mod, hardening
 from .detector import (
     CATEGORIES,
     CATEGORY_LABELS,
@@ -539,6 +539,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args.verbose)
+    # Locking the address space of a process that lives for milliseconds buys
+    # little; refusing a core dump of it costs nothing.
+    hardening.harden(lock_memory=False)
 
     try:
         return args.func(args)

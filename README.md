@@ -273,13 +273,39 @@ outside a GNOME session, you must export those three yourself.
   exclusions do not follow you to another machine unless the key file goes too,
   and bare digests written by 0.6 and earlier are dropped on first run — those
   values get flagged once more, and dismissing each re-adds it keyed.
-- **The honest caveat:** *Restore original* works by holding the pre-redaction
-  value in process memory for the retention window (60 seconds by default). This
-  machine has swap enabled, so that memory can reach disk. The window is short and
-  the buffer is dropped afterwards, but Python cannot guarantee the bytes are
-  scrubbed from the heap. Set `restore_timeout_secs = 0` in
+- **The retained value is locked into RAM.** *Restore original* works by holding
+  the pre-redaction value in process memory for the retention window (60 seconds
+  by default). At startup SafePaste calls `mlockall(MCL_CURRENT | MCL_FUTURE)` so
+  those pages cannot be swapped to disk, and sets *both* halves of `RLIMIT_CORE`
+  to 0 so a crash cannot write them into a core dump. Lowering a hard limit is
+  one-way, so nothing inside SafePaste can undo it later. Measured in a process
+  running this code: `VmLck` 0 -> 24 MB, core limit `(0, unlimited)` -> `(0, 0)`.
+  The unit ships `LimitMEMLOCK=infinity`, without which a distro's usual 8 MiB
+  ceiling makes the lock fail outright -- loudly, in the journal, rather than
+  silently. On macOS only the core-dump half applies: `mlockall` there needs
+  root, and `brew services` runs SafePaste as you.
+- **Refusing ptrace is opt-in, and here is the trade.** `refuse_ptrace = true`
+  under `[hardening]` adds `prctl(PR_SET_DUMPABLE, 0)`, so no process running as
+  you can attach to SafePaste and read the retained value. It is off by default
+  because an undumpable process also has an unreadable `/proc/self/root`, and
+  that is what xdg-desktop-portal opens to identify its caller. Measured against
+  a live GNOME 46 session, with it on:
+
+      AccessDenied: Portal operation not allowed: Unable to open /proc/PID/root
+
+  which costs you *About SafePaste* and auto-paste. On a kernel with Yama
+  (`ptrace_scope=1`, the Ubuntu default) an unrelated process cannot attach
+  anyway, so the default trades a small gain for two working features. The CLI
+  takes it unconditionally: it never speaks to a portal.
+- **The honest caveat:** none of that covers hibernation, which writes RAM to
+  disk whatever is locked; root, which reads any process it likes; pages that
+  reached swap *before* startup, which stay there until touched again; or old
+  copies on Python's heap, which the language gives no way to scrub. The value
+  also passes through the compositor's clipboard bridge, which is a different
+  process entirely. Set `restore_timeout_secs = 0` in
   `~/.config/safepaste/config.toml` to disable the undo entirely if that trade is
-  not worth it to you.
+  not worth it to you. `SAFEPASTE_NO_HARDENING=1` turns the whole lot off, which
+  is what you want when attaching a debugger to SafePaste itself.
 
 ## Detection
 

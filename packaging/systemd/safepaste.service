@@ -67,6 +67,22 @@ ProtectKernelTunables=true
 # No reason to read or write /proc/sys or /sys tunables.
 RestrictSUIDSGID=true
 # SafePaste never creates a setuid/setgid file.
+LimitCORE=0
+# Both halves of the limit, so a crash cannot write the retained clipboard
+# value into a dump. systemd's default here is a 0 *soft* limit with an
+# unlimited hard one, which anything inside the process can raise back;
+# safepaste.hardening lowers both at startup, and this makes it true even for
+# the moments before that call.
+LimitMEMLOCK=infinity
+# safepaste.hardening calls mlockall(MCL_CURRENT|MCL_FUTURE) so the value held
+# for "Restore original" cannot be swapped to disk, and mlockall is refused
+# outright once the process is larger than this ceiling. The distro default is
+# small enough (often 8 MiB) that a GTK process never fits, so the lock would
+# simply never happen. The ceiling is charged against mapped regions, not
+# resident pages: measured with GTK4 and libadwaita loaded, VmLck was 576 MB
+# against a VmRSS of 59 MB, so any tidy-looking round number here would fail.
+# The RAM actually pinned stays near the resident size, because the lock is
+# taken with MCL_ONFAULT -- pages are locked as they fault in, not up front.
 
 [Install]
 WantedBy=graphical-session.target

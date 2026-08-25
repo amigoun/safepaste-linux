@@ -45,6 +45,31 @@ jobs:
       - name: Fail on any warning
         run: xvfb-run -a python3 -m pytest -q -W error
 
+      - name: Startup hardening actually takes effect
+        # The suite proves the logic against a fake libc, on purpose: a test that
+        # really called mlockall would lock the whole pytest run's memory. This
+        # step is the other half -- the real syscalls, once, in a process that is
+        # about to exit, with refuse_ptrace on as the CLI runs it. The core limit
+        # and PR_SET_DUMPABLE are asserted because they hold on any runner
+        # regardless of desktop; the memory lock is only reported, because a
+        # runner's RLIMIT_MEMLOCK ceiling is not ours to promise and a refused
+        # lock is a loud warning by design, not a crash.
+        run: |
+          set -eu
+          python3 - <<'PYEOF'
+          import ctypes, logging, resource
+
+          logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+          from safepaste.hardening import harden
+
+          report = harden()
+          assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0), "core dumps still allowed"
+          libc = ctypes.CDLL("libc.so.6", use_errno=True)
+          assert libc.prctl(3, 0, 0, 0, 0) == 0, "still dumpable, so still ptrace-able"
+          locked = next(l.split()[1:] for l in open("/proc/self/status") if l.startswith("VmLck"))
+          print("VmLck:", " ".join(locked), "| memory_locked:", report.memory_locked)
+          PYEOF
+
       - name: Validate the vendored rule set offline
         # Checks the committed gitleaks.toml still matches its recorded digest and
         # that every rule compiles. Deliberately offline: a build that reached out

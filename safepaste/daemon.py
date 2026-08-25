@@ -23,7 +23,7 @@ import gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
-from . import config as config_mod
+from . import config as config_mod, hardening
 from .backend import Backend, get_backend
 from .guard import Guard
 
@@ -330,6 +330,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     cfg = config_mod.load(args.config)
+    # Before anything reads a clipboard, after logging exists so a degraded
+    # result is visible, and after the config because refusing ptrace is the
+    # user's call -- it costs them the portal.
+    hardening.harden(refuse_ptrace=cfg.refuse_ptrace)
     if args.mode:
         cfg.mode = args.mode
     return Daemon(cfg).run()

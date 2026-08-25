@@ -21,7 +21,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
-from . import config as config_mod
+from . import config as config_mod, hardening
 from .daemon import Daemon
 from .ui.dialog import present_detection
 
@@ -316,6 +316,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     cfg = config_mod.load(args.config)
+    # Before anything reads a clipboard, after logging exists so a degraded
+    # result is visible, and after the config because refusing ptrace is the
+    # user's call -- it costs them the portal.
+    hardening.harden(refuse_ptrace=cfg.refuse_ptrace)
     return SafePasteApp(cfg).run([sys.argv[0], *rest])
 
 

@@ -102,6 +102,16 @@ class Config:
     # and never a bare hash either: see `safepaste.detector.value_hash`.
     excluded_hashes: tuple[str, ...] = ()
 
+    # --- hardening --------------------------------------------------------
+    # prctl(PR_SET_DUMPABLE, 0) stops another process running as you from
+    # attaching to this one and reading the value held for "Restore original".
+    # Off by default because it also makes /proc/self/root unreadable, and that
+    # is what xdg-desktop-portal opens to identify its caller -- so with it on,
+    # About SafePaste and auto-paste stop working (measured; see
+    # safepaste.hardening). Swap and core-dump protection are unconditional and
+    # need no switch.
+    refuse_ptrace: bool = False
+
     # --- input ------------------------------------------------------------
     safe_paste_hotkey: str = "<Control><Alt>v"
     # Auto-injecting the paste needs the RemoteDesktop portal, which prompts for
@@ -223,6 +233,7 @@ _SECTIONS = {
     "redaction": ("placeholder", "label_rules", "keep_prefix"),
     "detection": ("regex_timeout", "max_scan_bytes", "extra_rule_globs"),
     "exclusions": ("excluded_hashes",),
+    "hardening": ("refuse_ptrace",),
     "input": ("safe_paste_hotkey", "auto_paste", "portal_restore_token"),
 }
 
