@@ -425,8 +425,22 @@ jobs:
           test "$out" = "$(printf 'keep\nGITHUB_TOKEN=[REDACTED]\nkeep')"
           # ... and clean text exits 0.
           printf 'nothing sensitive here\n' | safepaste scan -
-          test "$(printf 'hunter2' | safepaste hash)" \
-             = "f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c7"
+          # The digest is keyed by exclusion.key, so there is no constant to
+          # assert any more. What matters is the shape, that it repeats on this
+          # machine, that the key it needs was created private -- and that the
+          # bare hash of the value, which anyone could recompute from a guess,
+          # is nowhere in the output. That last line is the whole point of the
+          # keyed scheme, so it is worth a test rather than a comment.
+          d1=$(printf 'hunter2' | safepaste hash)
+          d2=$(printf 'hunter2' | safepaste hash)
+          test "$d1" = "$d2"
+          printf '%s\n' "$d1" | grep -Eq '^hmac-sha256:[0-9a-f]{64}$'
+          case "$d1" in
+            *f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c7*)
+              echo "the bare digest of the value leaked into the output"; exit 1;;
+          esac
+          keyfile="${XDG_CONFIG_HOME:-$HOME/.config}/safepaste/exclusion.key"
+          test "$(stat -c '%a' "$keyfile")" = "600"
 
       - name: Every module imports from the installed package
         run: |
