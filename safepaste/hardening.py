@@ -243,9 +243,10 @@ def _lock_memory(libc) -> bool:
         if err == errno.ENOMEM:
             log.warning(
                 "cannot lock memory against swap: RLIMIT_MEMLOCK is %s and this "
-                "process is already larger. Raise it -- LimitMEMLOCK= in the "
-                "systemd unit, or ulimit -l -- or the retained value can be "
-                "written to disk",
+                "process is already larger. A user service cannot raise its own "
+                "ceiling -- root has to, with DefaultLimitMEMLOCK= in "
+                "/etc/systemd/user.conf or a limits.conf entry -- and until then "
+                "the retained value can be written to disk",
                 _memlock_ceiling(),
             )
         else:

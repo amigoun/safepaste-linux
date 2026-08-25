@@ -280,10 +280,15 @@ outside a GNOME session, you must export those three yourself.
   to 0 so a crash cannot write them into a core dump. Lowering a hard limit is
   one-way, so nothing inside SafePaste can undo it later. Measured in a process
   running this code: `VmLck` 0 -> 24 MB, core limit `(0, unlimited)` -> `(0, 0)`.
-  The unit ships `LimitMEMLOCK=infinity`, without which a distro's usual 8 MiB
-  ceiling makes the lock fail outright -- loudly, in the journal, rather than
-  silently. On macOS only the core-dump half applies: `mlockall` there needs
-  root, and `brew services` runs SafePaste as you.
+  The unit asks for `LimitMEMLOCK=infinity`, but a *user* unit cannot raise its
+  own hard limit -- `systemd --user` is unprivileged -- so that is clamped to
+  whatever the login session already allows. Measured on the installed daemon:
+  asking for infinity left it at the session's 3.86 GiB, against 1.5 GB of locked
+  mappings, so the lock succeeds there. Where the session ceiling is the classic
+  8 MiB it will not, and the journal says so by name; lifting it is root's job --
+  `DefaultLimitMEMLOCK=` in `/etc/systemd/user.conf`, or a `limits.conf` entry.
+  On macOS only the core-dump half applies: `mlockall` there needs root, and
+  `brew services` runs SafePaste as you.
 - **Refusing ptrace is opt-in, and here is the trade.** `refuse_ptrace = true`
   under `[hardening]` adds `prctl(PR_SET_DUMPABLE, 0)`, so no process running as
   you can attach to SafePaste and read the retained value. It is off by default

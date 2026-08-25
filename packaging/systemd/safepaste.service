@@ -76,13 +76,21 @@ LimitCORE=0
 LimitMEMLOCK=infinity
 # safepaste.hardening calls mlockall(MCL_CURRENT|MCL_FUTURE) so the value held
 # for "Restore original" cannot be swapped to disk, and mlockall is refused
-# outright once the process is larger than this ceiling. The distro default is
-# small enough (often 8 MiB) that a GTK process never fits, so the lock would
-# simply never happen. The ceiling is charged against mapped regions, not
-# resident pages: measured with GTK4 and libadwaita loaded, VmLck was 576 MB
-# against a VmRSS of 59 MB, so any tidy-looking round number here would fail.
-# The RAM actually pinned stays near the resident size, because the lock is
-# taken with MCL_ONFAULT -- pages are locked as they fault in, not up front.
+# outright once the process is larger than this ceiling. The ceiling is charged
+# against mapped regions rather than resident pages: measured on the installed
+# 0.8.0 daemon, VmLck was 1.5 GB against a VmRSS of 165 MB, so any tidy-looking
+# round number here would refuse the lock. The RAM actually pinned stays near
+# the resident size, because MCL_ONFAULT locks pages as they fault in.
+#
+# Measured caveat, not assumed: a *user* unit cannot raise its own hard limit.
+# `systemd --user` is unprivileged and needs CAP_SYS_RESOURCE for that, so
+# "infinity" is clamped to whatever the login session already allows -- asking
+# for infinity here left the daemon at the session's 4141924352, confirmed in
+# /proc/PID/limits. It fits on that box and the lock succeeds. Where the session
+# ceiling is the classic 8 MiB it will not, the journal says so, and lifting it
+# is root's job: DefaultLimitMEMLOCK= in /etc/systemd/user.conf, or a
+# limits.conf entry. Kept regardless, because it does lift the soft limit to the
+# hard one and costs nothing.
 
 [Install]
 WantedBy=graphical-session.target
