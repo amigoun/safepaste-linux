@@ -17,8 +17,9 @@ case "$1" in
 SafePaste purged.
 
 Per-user data under ~/.config/safepaste/ -- each user's config.toml, any
-custom rules/*.toml, and the exclusion list of SHA-256 digests -- has
-been left in place for every user on this system.
+custom rules/*.toml, and exclusion.key, the machine-local key their
+exclusion list is hashed under -- has been left in place for every user
+on this system.
 
 This script runs as root and only ever touches package-owned files under
 /usr, /etc and similar system locations. ~/.config/safepaste/ is the one

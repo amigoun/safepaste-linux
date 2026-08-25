@@ -51,7 +51,12 @@ from typing import Protocol, runtime_checkable
 
 
 def content_hash(text: str) -> str:
-    """Identity for a clipboard value. Used to recognise our own writes."""
+    """Identity for a clipboard value. Used to recognise our own writes.
+
+    Unkeyed on purpose, unlike an exclusion digest: this one lives in memory for
+    the length of one clipboard change and is never written anywhere, so there is
+    no stored digest for anyone to test guesses against.
+    """
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 

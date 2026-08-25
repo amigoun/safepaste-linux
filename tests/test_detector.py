@@ -321,7 +321,12 @@ def test_excluded_hashes_suppresses_only_the_named_secret(ruleset: RuleSet) -> N
     d_plain = Detector(ruleset=ruleset)
     assert d_plain.scan(text), "sanity check: detected without any exclusion"
 
-    d_excluded = Detector(ruleset=ruleset, excluded_hashes=frozenset({value_hash(secret)}))
+    key = bytes(range(32))
+    d_excluded = Detector(
+        ruleset=ruleset,
+        excluded_hashes=frozenset({value_hash(secret, key)}),
+        exclusion_key=key,
+    )
     assert d_excluded.scan(text) == []
 
     # An unrelated secret is not caught up in the exclusion.

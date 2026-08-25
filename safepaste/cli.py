@@ -4,7 +4,8 @@ The GUI clipboard guard is the point of this project, but a CLI matters on its
 own: it is how detection gets exercised in CI and shell scripts with no
 display server involved, how `safepaste redact` slots into a paste-bin upload
 step, and how a user adds an exclusion (`safepaste hash`) without the
-plaintext secret ever touching a config file on disk -- only its SHA-256 does.
+plaintext secret ever touching a config file on disk -- only a keyed digest
+of it does.
 
 Every subcommand is a thin shell around the detector/redactor library; nothing
 here decides what counts as a secret, and this file must never modify that
@@ -26,6 +27,7 @@ import sys
 import textwrap
 from collections import Counter
 
+from . import config as config_mod
 from .detector import (
     CATEGORIES,
     CATEGORY_LABELS,
@@ -347,7 +349,9 @@ def cmd_hash(args: argparse.Namespace) -> int:
         text = text[:-1]
 
     log.debug("hashing %d char(s) read from stdin", len(text))
-    print(value_hash(text))
+    # Mints the key if this is the first thing on the machine to need one, so
+    # that a hand-written exclusion and one added from the dialog agree.
+    print(value_hash(text, config_mod.ensure_exclusion_key()))
     return 0
 
 
@@ -500,10 +504,14 @@ def _build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="hash a stdin value for use as an exclusion",
         description="Read a value from stdin and print its value_hash() "
-        "(SHA-256, hex). Exactly one trailing newline is stripped if present "
-        "(what a shell's printf/echo adds) and nothing else -- so this is how "
-        "you add an exclusion by hand without ever writing the plaintext "
-        "secret into a config file.",
+        "(HMAC-SHA256, hex, keyed by exclusion.key in the config directory and "
+        "minting that key if it does not exist yet). Exactly one trailing "
+        "newline is stripped if present (what a shell's printf/echo adds) and "
+        "nothing else -- so this is how you add an exclusion by hand without "
+        "ever writing the plaintext secret into a config file. The digest is "
+        "keyed, so it means nothing on another machine and nothing to anyone "
+        "who reads config.toml without the key: that is deliberate, because a "
+        "bare hash of a short or common value can simply be guessed.",
     )
     hash_p.set_defaults(func=cmd_hash)
 

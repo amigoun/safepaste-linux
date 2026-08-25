@@ -68,7 +68,8 @@ class DetectionDialog(Adw.MessageDialog):
 
         self.exclude_check = Gtk.CheckButton(label="Never flag this value again")
         self.exclude_check.set_tooltip_text(
-            "Stores a SHA-256 digest of the value, never the value itself."
+            "Stores a keyed digest of the value, never the value itself. The key "
+            "stays on this machine, so the stored entry gives nothing away on its own."
         )
         self.get_extra_child().append(self.exclude_check)
 

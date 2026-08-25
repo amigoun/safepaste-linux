@@ -87,6 +87,8 @@ class Guard:
         # Injected by whatever front end exists; a headless guard has no presenter.
         self.on_detection = on_detection
 
+        # Set before the detector is built: building one reads the key.
+        self._cached_exclusion_key: bytes | None = None
         self.detector = self._build_detector()
         self.writer = self.backend.clipboard_writer()
         self.monitor = self.backend.clipboard_monitor(self.handle)
@@ -156,9 +158,37 @@ class Guard:
             load_default(extra_paths=extra),
             categories=self.config.category_set,
             excluded_hashes=self.config.excluded_hash_set,
+            exclusion_key=self._cached_exclusion_key or config_mod.load_exclusion_key(),
             regex_timeout=self.config.regex_timeout,
             max_scan_bytes=self.config.max_scan_bytes,
         )
+
+    def _exclusion_key(self) -> bytes | None:
+        """The key exclusion digests are computed under, minted on first need.
+
+        Cached for the life of the process on purpose: reading it again per
+        detection would let a key swapped underneath us split the exclusion list
+        into values that still match and values that no longer do.
+
+        Only the write side mints one -- `_build_detector` reads without creating,
+        since a user who never excludes anything needs no key and there would be
+        nothing to check against anyway.
+
+        None if the key cannot be written at all (a read-only config directory).
+        This sits on the detection path, so it must not be able to take redaction
+        down with it: losing the key costs "never flag this again", nothing more.
+        """
+        if self._cached_exclusion_key is None:
+            try:
+                self._cached_exclusion_key = config_mod.ensure_exclusion_key()
+            except OSError as exc:
+                log.error(
+                    "cannot mint an exclusion key (%s); "
+                    "'never flag this value again' will not work",
+                    exc,
+                )
+                return None
+        return self._cached_exclusion_key
 
     @property
     def redaction_style(self) -> RedactionStyle:
@@ -235,8 +265,13 @@ class Guard:
             info["secrets"],
             ", ".join(info["labels"]),
         )
-        self._last_secret_hashes = tuple(
-            value_hash(event.text[f.start : f.end]) for f in findings
+        # Digests, not the values: this outlives the retention window, and
+        # "never flag this again" only ever needs to compare.
+        key = self._exclusion_key()
+        self._last_secret_hashes = (
+            tuple(value_hash(event.text[f.start : f.end], key) for f in findings)
+            if key is not None
+            else ()
         )
 
         result = redact(event.text, findings, self.redaction_style)
@@ -395,6 +430,8 @@ class Guard:
 
     def reload(self) -> None:
         self.config = config_mod.load()
+        for warning in self.config._warnings:
+            log.warning("config: %s", warning)
         self.detector = self._build_detector()
         log.info("reloaded: %d rules active", len(self.detector.active_rules))
 

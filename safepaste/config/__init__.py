@@ -7,7 +7,9 @@ raises on anything else rather than producing invalid TOML.
 
 The directory is created 0700 and no clipboard content is ever stored in it. The
 one place a secret could leak into config is the exclusion list, so that holds
-SHA-256 digests only — see `safepaste.detector.value_hash`.
+keyed digests only — HMAC-SHA256 under `exclusion.key`, a sibling file that is
+deliberately *not* part of config.toml. See `safepaste.detector.value_hash` for
+why an unkeyed hash is not enough, and `ensure_exclusion_key` below for the key.
 """
 
 from __future__ import annotations
@@ -15,10 +17,13 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+import secrets
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass, field, fields
 
+from ..detector.engine import EXCLUSION_SCHEME, is_keyed_digest
 from ..detector.rules import CATEGORIES
 
 log = logging.getLogger(__name__)
@@ -56,6 +61,13 @@ CONFIG_DIR = _config_dir()
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 RULES_DIR = CONFIG_DIR / "rules"
 
+# Beside config.toml, in a file of its own. config.toml is the one that gets
+# pasted into a bug report, copied to a second machine or committed to a dotfiles
+# repo; the key must not travel with it, because the two together are an offline
+# dictionary attack on every low-entropy value the user excluded.
+EXCLUSION_KEY_NAME = "exclusion.key"
+EXCLUSION_KEY_BYTES = 32
+
 # Categories enabled out of the box. High-entropy matching is the one that
 # generates complaints on ordinary text, so it stays opt-in.
 DEFAULT_CATEGORIES = tuple(c for c in CATEGORIES if c != "high_entropy")
@@ -86,7 +98,8 @@ class Config:
     max_scan_bytes: int = 1_048_576
 
     # --- exclusions -------------------------------------------------------
-    # SHA-256 of values the user chose to stop flagging. Never plaintext.
+    # Keyed digests of values the user chose to stop flagging. Never plaintext,
+    # and never a bare hash either: see `safepaste.detector.value_hash`.
     excluded_hashes: tuple[str, ...] = ()
 
     # --- input ------------------------------------------------------------
@@ -142,6 +155,22 @@ class Config:
             self.max_scan_bytes = 1_048_576
         if self.keep_prefix < 0:
             self.keep_prefix = 0
+        keyed = tuple(h for h in self.excluded_hashes if is_keyed_digest(h))
+        unkeyed = len(self.excluded_hashes) - len(keyed)
+        if unkeyed:
+            # Written by SafePaste 0.6 and earlier as a bare SHA-256. Those are
+            # recoverable by guessing -- which is the whole reason for the keyed
+            # scheme -- and cannot be converted, because converting needs the
+            # plaintext we deliberately never kept. So they stop counting, and
+            # the values get flagged again: one dialog each re-adds them keyed.
+            self._warnings.append(
+                f"ignoring {unkeyed} exclusion(s) stored as a bare hash, which is "
+                "guessable for a short or common value. Those values will be "
+                "flagged again -- dismiss each once to re-add it as "
+                f"{EXCLUSION_SCHEME}. The old lines stay in config.toml until "
+                "SafePaste next writes it; deleting them by hand is safe"
+            )
+        self.excluded_hashes = keyed
         valid_policy = []
         for app, mode in self.app_modes:
             if mode not in MODES:
@@ -250,8 +279,10 @@ def save(cfg: Config, path: pathlib.Path | None = None) -> None:
 
     lines = [
         "# SafePaste configuration.",
-        "# Exclusions are SHA-256 digests, never plaintext:",
+        f"# Exclusions are {EXCLUSION_SCHEME} digests, never plaintext:",
         "#   printf '%s' 'the-value' | safepaste hash",
+        f"# They are keyed by {EXCLUSION_KEY_NAME} in this directory, so they only",
+        "# mean anything on this machine and this file alone gives up nothing.",
         "",
     ]
     for section, keys in _SECTIONS.items():
@@ -286,3 +317,103 @@ def _emit(value: object) -> str:
     if isinstance(value, (tuple, list)):
         return "[" + ", ".join(_emit(v) for v in value) + "]"
     raise TypeError(f"cannot serialise {type(value).__name__} to TOML")
+
+
+# ---------------------------------------------------------------------------
+# the exclusion key
+# ---------------------------------------------------------------------------
+
+
+def exclusion_key_path(config_path: pathlib.Path | None = None) -> pathlib.Path:
+    """Where the key lives: beside the config file it belongs to.
+
+    Beside rather than inside, so that handing someone your config.toml hands
+    them no way to test guesses against your exclusions.
+    """
+    parent = config_path.parent if config_path is not None else CONFIG_DIR
+    return parent / EXCLUSION_KEY_NAME
+
+
+def load_exclusion_key(config_path: pathlib.Path | None = None) -> bytes | None:
+    """The machine-local exclusion key, or None if there is not one yet.
+
+    Never creates anything -- a read is a read. Every failure here returns None,
+    which fails in the safe direction: exclusions stop matching, so values get
+    flagged again rather than being waved through on a digest nothing can verify.
+    """
+    path = exclusion_key_path(config_path)
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        log.error("cannot read the exclusion key at %s (%s)", path, exc)
+        return None
+    try:
+        key = bytes.fromhex(raw)
+    except ValueError:
+        log.error("the exclusion key at %s is not hex; exclusions cannot match", path)
+        return None
+    if len(key) < EXCLUSION_KEY_BYTES:
+        log.error(
+            "the exclusion key at %s is %d bytes, expected %d; exclusions cannot match",
+            path,
+            len(key),
+            EXCLUSION_KEY_BYTES,
+        )
+        return None
+    return key
+
+
+def ensure_exclusion_key(config_path: pathlib.Path | None = None) -> bytes:
+    """The machine-local exclusion key, minting one on first use.
+
+    Created by writing a temporary file and *linking* it into place, not by
+    writing the final path directly. Two SafePaste processes can want a key at
+    the same moment (the daemon on a detection, `safepaste hash` in a shell); the
+    link fails for the loser, who then reads the winner's key. An os.replace
+    would let the loser overwrite it instead, silently invalidating every
+    exclusion the winner had just written. It also means no reader ever sees a
+    half-written key.
+    """
+    existing = load_exclusion_key(config_path)
+    if existing is not None:
+        return existing
+
+    path = exclusion_key_path(config_path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)  # mkdir's mode is subject to umask
+
+    key = secrets.token_bytes(EXCLUSION_KEY_BYTES)
+    # mkstemp, not a name of our own: it opens 0600 and O_EXCL, so the key never
+    # exists even for an instant as a file another user on the box can read, and
+    # a temporary left behind by an earlier crash cannot collide with this one.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f"{EXCLUSION_KEY_NAME}.", suffix=".tmp"
+    )
+    tmp = pathlib.Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(key.hex() + "\n")
+            # A half-written key reads as no key at all, which would quietly
+            # invalidate every exclusion written under it. Cheap: once ever.
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            pass
+    finally:
+        tmp.unlink()
+
+    won = load_exclusion_key(config_path)
+    if won is None:  # pragma: no cover - the directory went away under us
+        log.error(
+            "could not persist an exclusion key at %s; exclusions will not stick", path
+        )
+        return key
+    if won != key:
+        log.info("another process created the exclusion key first; using that one")
+    else:
+        log.info("minted a new exclusion key at %s", path)
+    return won

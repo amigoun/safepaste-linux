@@ -54,8 +54,8 @@ ProtectSystem=strict
 # Ubuntu 24.04, where the directives below are inert anyway (see above), and
 # would have broken the service on the first system where they took effect.
 ReadWritePaths=%h/.config
-# SafePaste's only on-disk state is ~/.config/safepaste/ (config.toml, the
-# SHA-256 exclusion list, an optional rules/ dir -- see
+# SafePaste's only on-disk state is ~/.config/safepaste/ (config.toml with
+# its keyed exclusion list, exclusion.key, an optional rules/ dir -- see
 # safepaste/config/__init__.py). That subdirectory does not exist yet on a
 # brand-new install, and ReadWritePaths= silently skips a path that is
 # missing *at unit start*, which would leave a fresh install saving into

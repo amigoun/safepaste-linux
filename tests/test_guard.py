@@ -10,10 +10,13 @@ hardest to stage for real.
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from safepaste.backend import Backend, ClipboardEvent
-from safepaste.config import Config
+from safepaste.config import Config, EXCLUSION_KEY_NAME
+from safepaste.detector import EXCLUSION_SCHEME, is_keyed_digest
 from safepaste.guard import Guard
 
 SECRET = "ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z"
@@ -319,9 +322,68 @@ def test_exclusions_store_digests_never_plaintext(guard_factory) -> None:
     guard.handle(ClipboardEvent.of(PAYLOAD))
     guard.exclude_last_value()
 
+    assert guard.config.excluded_hashes
     for digest in guard.config.excluded_hashes:
-        assert len(digest) == 64
+        assert is_keyed_digest(digest)
+        assert len(digest.split(":", 1)[1]) == 64
         assert SECRET not in digest
+
+
+def test_the_exclusion_file_gives_nothing_away_without_the_key(
+    guard_factory, tmp_path
+) -> None:
+    """config.toml alone must not confirm a guess at an excluded value.
+
+    A bare SHA-256 would: the reader hashes their candidate and compares. This is
+    the leak the keyed digest closes, so it is worth asserting on the bytes that
+    actually land on disk rather than on the digest in memory.
+    """
+    guard, _, _ = guard_factory(mode="redact")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    guard.exclude_last_value()
+
+    written = (tmp_path / "config.toml").read_text()
+    assert EXCLUSION_SCHEME in written
+    assert SECRET not in written
+    assert hashlib.sha256(SECRET.encode("utf-8")).hexdigest() not in written
+
+    key_file = tmp_path / EXCLUSION_KEY_NAME
+    assert key_file.exists(), "the key is a file of its own, minted on first use"
+    assert key_file.read_text().strip() not in written
+
+
+def test_a_key_lost_after_an_exclusion_flags_the_value_again(
+    guard_factory, tmp_path
+) -> None:
+    """Losing the key must fail towards protection, not towards silence."""
+    guard, backend, _ = guard_factory(mode="redact")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    guard.exclude_last_value()
+
+    (tmp_path / EXCLUSION_KEY_NAME).unlink()
+    reborn, reborn_backend, _ = guard_factory(
+        mode="redact", excluded_hashes=guard.config.excluded_hashes
+    )
+    reborn.handle(ClipboardEvent.of(PAYLOAD))
+    assert reborn_backend.writer.writes, "with no key to check against, flag it"
+
+
+def test_a_key_that_cannot_be_written_still_leaves_us_protected(
+    guard_factory, monkeypatch
+) -> None:
+    """Minting the key is file I/O on the detection path. It must not be fatal."""
+    import safepaste.config as config_mod
+
+    guard, backend, _ = guard_factory(mode="redact")
+    monkeypatch.setattr(
+        config_mod,
+        "ensure_exclusion_key",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only file system")),
+    )
+
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert backend.writer.writes, "the redaction is what matters; it still happened"
+    assert guard.exclude_last_value() is False, "no key, so nothing to exclude with"
 
 
 def test_excluding_with_nothing_detected_is_a_no_op(guard_factory) -> None:

@@ -10,7 +10,8 @@ Ordering is the whole false-positive strategy, so it is worth stating plainly:
   3. entropy — reject candidates that do not look random enough.
   4. allowlists — per-rule, then global: template placeholders, `${VAR}`, and so on.
   5. user exclusions — values the user has explicitly said to stop flagging,
-     compared by SHA-256 so no plaintext is ever retained.
+     compared by a keyed digest so no plaintext is ever retained and no guess
+     can be tested against the stored digest either (see `value_hash`).
 
 Nothing here logs clipboard content. Findings carry offsets and rule ids only;
 that invariant is enforced by tests/test_privacy.py.
@@ -19,6 +20,7 @@ that invariant is enforced by tests/test_privacy.py.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import time
 from dataclasses import dataclass
@@ -36,9 +38,37 @@ DEFAULT_MAX_SCAN_BYTES = 1_048_576
 DEFAULT_REGEX_TIMEOUT = 0.25
 
 
-def value_hash(secret: str) -> str:
-    """Stable id for a secret value, for exclusions. Never reversible."""
-    return hashlib.sha256(secret.encode("utf-8", "surrogatepass")).hexdigest()
+# Named in the digest itself, so a config file states which algorithm produced
+# its exclusions. That is what lets an entry written by an older SafePaste be
+# recognised on sight rather than guessed at (safepaste.config drops those), and
+# what makes adding a second scheme later a non-event.
+EXCLUSION_SCHEME = "hmac-sha256"
+
+
+def value_hash(secret: str, key: bytes) -> str:
+    """Stable id for a secret value, for exclusions. Never reversible.
+
+    Keyed, and that is the whole point. A bare SHA-256 is only one-way for values
+    that were unguessable to begin with: `hunter2`, `admin` or a weak database
+    password can be recovered from their digest by anyone who reads the exclusion
+    list, one guess at a time, offline. HMAC under a key that lives outside
+    config.toml leaves a reader of that file nothing to test a guess against.
+
+    `key` is required rather than defaulted so that no call site can quietly
+    produce the guessable form; see `safepaste.config.ensure_exclusion_key` for
+    where the key comes from.
+    """
+    if not key:
+        raise ValueError(
+            "an exclusion digest needs a key; refusing to write an unkeyed one"
+        )
+    mac = hmac.new(key, secret.encode("utf-8", "surrogatepass"), hashlib.sha256)
+    return f"{EXCLUSION_SCHEME}:{mac.hexdigest()}"
+
+
+def is_keyed_digest(entry: str) -> bool:
+    """Whether an exclusion entry carries a keyed digest this version can check."""
+    return entry.startswith(f"{EXCLUSION_SCHEME}:")
 
 
 @dataclass(frozen=True)
@@ -75,12 +105,34 @@ class Detector:
         *,
         categories: frozenset[str] | None = None,
         excluded_hashes: frozenset[str] = frozenset(),
+        exclusion_key: bytes | None = None,
         regex_timeout: float = DEFAULT_REGEX_TIMEOUT,
         max_scan_bytes: int = DEFAULT_MAX_SCAN_BYTES,
     ) -> None:
         self.ruleset = ruleset if ruleset is not None else load_default()
         self.categories = categories
-        self.excluded_hashes = excluded_hashes
+        # Anything that is not a keyed digest cannot be checked, so it is dropped
+        # here rather than silently never matching. Config drops these too; a
+        # Detector built by hand (the CLI, a test) gets the same treatment.
+        self.excluded_hashes = frozenset(
+            h for h in excluded_hashes if is_keyed_digest(h)
+        )
+        unusable = len(excluded_hashes) - len(self.excluded_hashes)
+        if unusable:
+            log.warning(
+                "ignoring %d exclusion(s) that are not %s digests",
+                unusable,
+                EXCLUSION_SCHEME,
+            )
+        self.exclusion_key = exclusion_key
+        if self.excluded_hashes and exclusion_key is None:
+            # Fail-safe: values the user dismissed get flagged again rather than
+            # being let through on an unverifiable match.
+            log.warning(
+                "%d exclusion(s) cannot be checked without the exclusion key; "
+                "those values will be flagged again",
+                len(self.excluded_hashes),
+            )
         self.regex_timeout = regex_timeout
         self.max_scan_bytes = max_scan_bytes
         self._active = self.ruleset.enabled_for(categories)
@@ -112,6 +164,16 @@ class Detector:
         if span == (-1, -1):  # group declared but did not participate
             span = m.span(0)
         return span if span[1] > span[0] else None
+
+    def _is_excluded(self, secret: str) -> bool:
+        """Whether the user has said to stop flagging this exact value.
+
+        Both guards are for the common case rather than for correctness: most
+        users exclude nothing, and an HMAC per surviving candidate is not free.
+        """
+        if not self.excluded_hashes or self.exclusion_key is None:
+            return False
+        return value_hash(secret, self.exclusion_key) in self.excluded_hashes
 
     def scan(self, text: str) -> list[Finding]:
         if not text:
@@ -159,7 +221,7 @@ class Detector:
                 secret = text[span[0] : span[1]]
                 if not entropy_mod.passes(secret, rule.entropy):
                     continue
-                if value_hash(secret) in self.excluded_hashes:
+                if self._is_excluded(secret):
                     continue
                 line = _line_containing(text, span[0])
                 whole = m.group(0)

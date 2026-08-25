@@ -136,7 +136,7 @@ total rules: 232
 active by default: 231  opt-in: 1  vetoed: 0
 
 $ printf 'hunter2' | safepaste hash          # for hand-writing an exclusion
-f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c7
+hmac-sha256:eaea80387563e7a3765f0ca373b2a37c354de218d2c2f01082e773f3806f7151
 ```
 
 `scan` exits 1 when it finds something and 0 when clean, so it composes in
@@ -263,8 +263,16 @@ outside a GNOME session, you must export those three yourself.
 - **No clipboard content in logs.** Log records carry rule ids, offsets, counts and
   timings only, and a test asserts the secret literal never reaches a log record.
 - **No clipboard history on disk.** There is no history feature.
-- **Exclusions are SHA-256 digests.** "Never flag this value again" stores a hash,
-  never the value. `~/.config/safepaste/` is `0700` and `config.toml` is `0600`.
+- **Exclusions are keyed digests.** "Never flag this value again" stores an
+  HMAC-SHA256 of the value under `exclusion.key`, never the value. The key is
+  minted on first use and deliberately kept *out* of `config.toml`, because a
+  plain hash only protects a value that was unguessable to begin with: anyone
+  holding a list of bare digests can try `hunter2`, `admin` or a weak database
+  password offline until one matches. `~/.config/safepaste/` is `0700`;
+  `config.toml` and `exclusion.key` are `0600`. Two consequences worth knowing:
+  exclusions do not follow you to another machine unless the key file goes too,
+  and bare digests written by 0.6 and earlier are dropped on first run — those
+  values get flagged once more, and dismissing each re-adds it keyed.
 - **The honest caveat:** *Restore original* works by holding the pre-redaction
   value in process memory for the retention window (60 seconds by default). This
   machine has swap enabled, so that memory can reach disk. The window is short and
@@ -379,7 +387,10 @@ python3 -m safepaste.backend.windows    # Windows: same, against the real clipbo
 | macOS | `~/Library/Application Support/SafePaste/` |
 | Windows | `%APPDATA%\SafePaste\` |
 
-`$XDG_CONFIG_HOME` wins on any platform if you set it.
+`$XDG_CONFIG_HOME` wins on any platform if you set it. The directory holds
+`config.toml`, your extra `rules/`, and `exclusion.key` — the last one is the
+only file here that is a secret of its own, and the only one not to paste into a
+bug report.
 
 ### The most valuable things not yet built
 
