@@ -14,6 +14,7 @@ itself bumps the count, `stringForType_` returns None when the type is absent, a
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import sys
 
@@ -256,14 +257,29 @@ def test_a_failing_change_count_does_not_raise(board: FakePasteboard) -> None:
 # --- injector -------------------------------------------------------------
 
 
-def test_injector_declines_without_accessibility_permission() -> None:
+def test_injector_declines_without_accessibility_permission(monkeypatch) -> None:
     """A process without Accessibility permission must decline, never raise.
 
-    This used to pass for the wrong reason -- ApplicationServices is not a
-    dependency, so the import failed and _trusted returned False on every
-    machine, including one that had granted permission. It now asks Quartz,
-    which is a real dependency, so an ungranted CI runner is what makes this
-    False and the assertion means what it says."""
+    The ungranted state is forced rather than assumed. This test used to pass
+    for the wrong reason -- ApplicationServices is not a dependency, so the
+    import failed and _trusted returned False on every machine, granted or
+    not. Asking Quartz fixed that, and promptly showed why the assumption was
+    unsafe: GitHub's macOS runners *do* have post-event access, so
+    CGPreflightPostEventAccess returns True there and an unconditional
+    "ready is False" fails. What this test is about is the refusal path, so it
+    pins the permission answer and leaves the machine's own TCC state out of
+    it. Whether a granted process reports True is
+    test_accessibility_trust_does_not_depend_on_applicationservices' job.
+    """
+    for module_name, attr in (
+        ("Quartz", "CGPreflightPostEventAccess"),
+        ("ApplicationServices", "AXIsProcessTrusted"),
+    ):
+        if importlib.util.find_spec(module_name) is not None:
+            monkeypatch.setattr(
+                importlib.import_module(module_name), attr, lambda: False, raising=False
+            )
+
     injector = DarwinInjector()
     assert injector.ready is False
     results: list[bool] = []
