@@ -15,6 +15,7 @@ itself bumps the count, `stringForType_` returns None when the type is absent, a
 from __future__ import annotations
 
 import importlib.util
+import sys
 
 import pytest
 
@@ -256,8 +257,13 @@ def test_a_failing_change_count_does_not_raise(board: FakePasteboard) -> None:
 
 
 def test_injector_declines_without_accessibility_permission() -> None:
-    """On this machine ApplicationServices is absent, which is the same code path
-    as a Mac that has not granted Accessibility: decline, never raise."""
+    """A process without Accessibility permission must decline, never raise.
+
+    This used to pass for the wrong reason -- ApplicationServices is not a
+    dependency, so the import failed and _trusted returned False on every
+    machine, including one that had granted permission. It now asks Quartz,
+    which is a real dependency, so an ungranted CI runner is what makes this
+    False and the assertion means what it says."""
     injector = DarwinInjector()
     assert injector.ready is False
     results: list[bool] = []
@@ -296,8 +302,6 @@ def test_get_backend_routes_darwin_without_needing_a_mac() -> None:
     broke the Windows suite the moment its tray was implemented, and these two
     would have broken here for exactly the same reason.
     """
-    import sys
-
     backend = get_backend("darwin")
     assert backend.name == "darwin"
     # Permanently true: NSPasteboard does not block on a locked screen, so there is
@@ -617,3 +621,135 @@ def test_a_run_loop_that_never_started_pumps_harmlessly() -> None:
     loop = RunLoop()
     assert loop.ready is False
     assert loop.pump() is True  # must not raise off a Mac
+
+
+# --- macOS-only regressions ----------------------------------------------
+#
+# These three need the real AppKit, because each bug lived precisely in the part
+# the fake pasteboard cannot stand in for. All three shipped in 0.8.1 and none of
+# them was visible to the suite above.
+
+macos_only = pytest.mark.skipif(
+    sys.platform != "darwin", reason="needs the real AppKit, not a fake pasteboard"
+)
+
+
+@macos_only
+def test_menu_target_class_may_be_built_more_than_once() -> None:
+    """An Objective-C class name is a process-wide registration.
+
+    Evaluating the class body twice raises "overriding existing Objective-C
+    class". _apply_menu calls this on every refresh, and the raise landed before
+    setMenu_, so every refresh after the first silently left the old menu in
+    place -- no mode checkmark, no status line, no Resume item.
+    """
+    from safepaste.backend.darwin_loop import _menu_target_class
+
+    first = _menu_target_class()
+    assert _menu_target_class() is first
+    assert _menu_target_class() is first
+
+
+@macos_only
+def test_every_refresh_reattaches_the_menu() -> None:
+    """The menu must track the guard's state, not freeze at startup."""
+    from safepaste.backend.darwin_loop import Tray
+
+    class StubItem:
+        def __init__(self) -> None:
+            self.menu_obj = None
+            self.calls = 0
+
+        def setMenu_(self, menu):  # noqa: N802
+            self.menu_obj = menu
+            self.calls += 1
+
+        def button(self):
+            return None
+
+    class StubLoop:
+        ready = True
+
+    tray = Tray(StubLoop())
+    tray._item = StubItem()
+
+    tray._refresh()
+    tray.set_state("redact", False)
+    tray.set_alert(2)
+    tray.set_state("ask", False)
+
+    assert tray._item.calls == 4, "a refresh that does not reattach is a frozen menu"
+
+    titles = [
+        tray._item.menu_obj.itemAtIndex_(i).title()
+        for i in range(tray._item.menu_obj.numberOfItems())
+    ]
+    checked = [
+        tray._item.menu_obj.itemAtIndex_(i).title()
+        for i in range(tray._item.menu_obj.numberOfItems())
+        if tray._item.menu_obj.itemAtIndex_(i).state()
+    ]
+    assert "Ask every time" in titles
+    assert checked == ["Ask every time"], "the tick must follow the mode"
+
+
+@macos_only
+def test_pump_dispatches_queued_application_events() -> None:
+    """A click on the status item is an NSEvent in NSApplication's queue.
+
+    NSRunLoop.runMode_beforeDate_ services run-loop sources and timers and never
+    touches that queue, so the icon drew and every click on it was discarded.
+    Only nextEventMatchingMask/sendEvent_ delivers them.
+
+    Asserted against a stub NSApplication rather than the real one on purpose.
+    Whether a posted event is *visible* to a peek depends on the run loop having
+    turned, which makes "is the queue empty" a timing-dependent signal that
+    passes against the bug about as often as it fails. What is not timing
+    dependent is whether pump asks the application for its events at all: the
+    released implementation never called either method.
+    """
+    from safepaste.backend.darwin_loop import RunLoop
+
+    class StubApp:
+        def __init__(self, queued: int) -> None:
+            self.pending = [f"event-{i}" for i in range(queued)]
+            self.sent: list[str] = []
+
+        def nextEventMatchingMask_untilDate_inMode_dequeue_(  # noqa: N802
+            self, _mask, _until, _mode, dequeue
+        ):
+            if not (dequeue and self.pending):
+                return None
+            return self.pending.pop(0)
+
+        def sendEvent_(self, event):  # noqa: N802
+            self.sent.append(event)
+
+    loop = RunLoop(slice_seconds=0.01)
+    app = StubApp(queued=3)
+    loop._app = app
+    loop._ok = True
+
+    assert loop.pump() is True
+    assert app.sent == ["event-0", "event-1", "event-2"], (
+        "pump must drain and dispatch the application's event queue; "
+        "servicing the run loop alone discards every click"
+    )
+    assert app.pending == []
+
+
+@macos_only
+def test_accessibility_trust_does_not_depend_on_applicationservices(monkeypatch) -> None:
+    """ApplicationServices is a PyObjC distribution this package does not depend on.
+
+    While _trusted imported it, the import failed on every install that followed
+    the declared dependencies, so auto-paste refused forever regardless of what
+    the user granted in System Settings. Quartz is a real dependency.
+    """
+    import Quartz
+
+    monkeypatch.setattr(Quartz, "CGPreflightPostEventAccess", lambda: True)
+    assert DarwinInjector().ready is True
+
+    monkeypatch.setattr(Quartz, "CGPreflightPostEventAccess", lambda: False)
+    assert DarwinInjector().ready is False

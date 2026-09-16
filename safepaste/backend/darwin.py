@@ -317,7 +317,28 @@ class DarwinInjector:
         return self._trusted()
 
     def _trusted(self) -> bool:
-        """Whether this process has been granted Accessibility permission."""
+        """Whether this process has been granted Accessibility permission.
+
+        Asked of Quartz first, deliberately. `AXIsProcessTrusted` lives in
+        ApplicationServices, which is a PyObjC distribution of its own and is not
+        one this package depends on -- so on any install that follows the declared
+        dependencies the import fails, `_trusted` reports False, and `_send`
+        refuses forever no matter what the user granted in System Settings. The
+        symptom is auto-paste that is not merely unreported but permanently dead.
+
+        `CGPreflightPostEventAccess` asks the same TCC gate, ships in
+        pyobjc-framework-Quartz which is already required, and is the check that
+        actually matches what we do here -- post an event, rather than drive the
+        accessibility API. ApplicationServices stays as a fallback for macOS
+        older than 10.15, where the Quartz call does not exist.
+        """
+        try:
+            from Quartz import CGPreflightPostEventAccess  # noqa: PLC0415
+
+            return bool(CGPreflightPostEventAccess())
+        except Exception as exc:  # noqa: BLE001
+            log.debug("CGPreflightPostEventAccess unavailable: %s", exc)
+
         try:
             from ApplicationServices import AXIsProcessTrusted  # noqa: PLC0415
 
