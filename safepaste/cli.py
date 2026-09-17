@@ -41,6 +41,7 @@ from .detector import (
 )
 from .detector.engine import DEFAULT_MAX_SCAN_BYTES, DEFAULT_REGEX_TIMEOUT
 from .detector.rules import humanise
+from . import __version__
 from .redactor import (
     DEFAULT_KEEP_PREFIX,
     DEFAULT_KEEP_SUFFIX,
@@ -437,6 +438,16 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Detect and redact secrets in text, from the command line.",
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # Read from safepaste.__version__ rather than importlib.metadata, for the
+    # reason about.py spells out: the .deb copies the tree in and writes its own
+    # shims, so nothing ever pip-installs itself and there is no distribution
+    # for metadata to find. This is the one read that works on all three.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"safepaste {__version__}",
+        help="print the installed version and exit",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

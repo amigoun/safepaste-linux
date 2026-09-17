@@ -20,6 +20,7 @@ import sys
 
 import pytest
 
+from conftest import ABOUT_LABEL, QUIT_LABEL
 from safepaste.backend import (
     ClipboardEvent,
     ClipboardMonitor,
@@ -567,11 +568,15 @@ def test_the_macos_menu_matches_the_other_platforms() -> None:
         "Pause 15 minutes",
         "Pause 1 hour",
         "Preferences…",
-        "About SafePaste",
+        ABOUT_LABEL,
+        QUIT_LABEL,
     ):
         assert expected in labels
-    # The one deliberate difference: Mac convention names the application in Quit.
-    assert "Quit SafePaste" in labels
+    # "Quit SafePaste" used to be a deliberate macOS-only spelling, following
+    # Apple's convention of naming the application in Quit. The other two now
+    # match it rather than the reverse, so the convention is kept and the
+    # wording is shared.
+    assert QUIT_LABEL in labels
 
 
 def test_exactly_one_mode_is_checked_on_macos() -> None:

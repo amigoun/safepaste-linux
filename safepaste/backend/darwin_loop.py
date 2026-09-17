@@ -296,6 +296,7 @@ class Tray:
 
         Same items, order and wording as the Linux and Windows trays.
         """
+        from .. import __version__
         from ..config import MODES
 
         status = (
@@ -327,7 +328,9 @@ class Tray:
             items.append(("action", "Resume protection", {"action": "resume"}))
         items.append(("separator", "", {}))
         items.append(("action", "Preferences…", {"action": "preferences"}))
-        items.append(("action", "About SafePaste", {"action": "about"}))
+        items.append(
+            ("action", f"About SafePaste {__version__}", {"action": "about"})
+        )
         items.append(("action", "Quit SafePaste", {"action": "quit"}))
         return items
 

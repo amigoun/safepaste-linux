@@ -86,3 +86,86 @@ def test_open_homepage_opens_the_homepage(monkeypatch) -> None:
     monkeypatch.setattr(about, "open_url", lambda url: opened.append(url) or True)
     assert about.open_homepage() is True
     assert opened == [about.HOMEPAGE]
+
+
+# ---------------------------------------------------------------------------
+# Where the installed version is visible
+# ---------------------------------------------------------------------------
+#
+# It was readable nowhere at runtime except the Linux-only D-Bus Version
+# property: no --version on either entry point, and nothing in any tray.
+
+
+def test_the_cli_reports_its_version(capsys) -> None:
+    from safepaste import __version__
+    from safepaste.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"safepaste {__version__}"
+
+
+def test_the_daemon_reports_its_version_without_importing_a_toolkit(
+    capsys, monkeypatch
+) -> None:
+    """Answered before dispatch, so it works where the service cannot start.
+
+    Pinned by pretending to be a platform with no backend at all: the version
+    must still come back, and the "no SafePaste service for platform" path must
+    not be reached.
+    """
+    from safepaste import __version__
+    from safepaste.service import main
+
+    monkeypatch.setattr("sys.platform", "aix7")
+    assert main(["--version"]) == 0
+    assert capsys.readouterr().out.strip() == f"safepaste {__version__}"
+
+
+def test_the_version_is_read_from_the_package_not_from_metadata() -> None:
+    """importlib.metadata cannot be the source, and this says why.
+
+    The .deb copies the tree in and writes its own shims, so nothing ever
+    pip-installs itself and there is no distribution for metadata to find. A
+    version surface built on it would work on Homebrew and Scoop and report
+    nothing on the platform this project started on.
+    """
+    import safepaste
+
+    assert isinstance(safepaste.__version__, str)
+    assert safepaste.__version__.count(".") >= 2
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    source = (root / "safepaste" / "__init__.py").read_text(encoding="utf-8")
+    assert f'__version__ = "{safepaste.__version__}"' in source
+
+
+def test_the_packaged_version_matches_the_source() -> None:
+    """build-deb.sh and build-exe.py both sed this line out of __init__.py."""
+    import re
+
+    import safepaste
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    source = (root / "safepaste" / "__init__.py").read_text(encoding="utf-8")
+    found = re.search(r'^__version__ = "(.*)"$', source, re.MULTILINE)
+    assert found is not None, "the packaging scripts' sed pattern no longer matches"
+    assert found.group(1) == safepaste.__version__
+
+
+def test_the_macos_about_item_shows_the_version() -> None:
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("needs AppKit for the Tray")
+    from conftest import ABOUT_LABEL
+    from safepaste.backend.darwin_loop import Tray
+
+    class _Loop:
+        ready = True
+
+    labels = [label for _k, label, _a in Tray(_Loop()).build_menu_items()]
+    assert ABOUT_LABEL in labels
+    assert __import__("safepaste").__version__ in ABOUT_LABEL

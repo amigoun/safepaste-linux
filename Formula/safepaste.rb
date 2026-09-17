@@ -102,6 +102,10 @@ class Safepaste < Formula
     # a real redaction rather than just that the binary runs.
     assert_match(/total rules: \d\d\d/, shell_output("#{bin}/safepaste rules --stats"))
 
+    # The installed code must report the version the formula thinks it built.
+    # A stale build that still runs is otherwise invisible here.
+    assert_equal "safepaste #{version}", shell_output("#{bin}/safepaste --version").strip
+
     output = pipe_output(
       "#{bin}/safepaste redact -",
       "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n",
