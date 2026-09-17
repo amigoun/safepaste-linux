@@ -9,9 +9,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..detector.engine import Finding, merge_spans
+from ..detector.engine import DEFAULT_PLACEHOLDER, Finding, merge_spans
 
-DEFAULT_PLACEHOLDER = "[REDACTED]"
+__all__ = [
+    "DEFAULT_KEEP_PREFIX",
+    "DEFAULT_KEEP_SUFFIX",
+    "DEFAULT_PLACEHOLDER",
+    "MIN_HIDDEN_CHARS",
+    "Redaction",
+    "RedactionStyle",
+    "redact",
+]
 
 # Kept at each end of a secret by default, so a redacted value can still be told
 # apart from its neighbours: the head carries the key type (ghp_, AKIA, ox_) and

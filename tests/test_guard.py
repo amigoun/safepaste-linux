@@ -511,3 +511,21 @@ def test_a_negative_edge_count_is_clamped_not_honoured(guard_factory) -> None:
     written = backend.writer.writes[-1]
     assert "GITHUB_TOKEN=[REDACTED]" in written
     assert SECRET not in written
+
+
+def test_a_custom_placeholder_reaches_the_detector(guard_factory) -> None:
+    """Config's placeholder must reach detection, not only redaction.
+
+    Wiring it into RedactionStyle alone would leave the detector looking for
+    "[REDACTED]" in text that now says something else, so a user who changed
+    the placeholder would get their own sanitised clipboard flagged straight
+    back at them -- the exact bug this fixes, reintroduced for anyone who
+    customised it.
+    """
+    guard, backend, _ = guard_factory(placeholder="<<HIDDEN>>")
+    guard.start()
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    written = backend.writer.writes[-1]
+    assert "<<HIDDEN>>" in written
+    assert guard.detector.scan(written) == [], "the guard flags its own output"

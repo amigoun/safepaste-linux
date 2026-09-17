@@ -468,6 +468,12 @@ jobs:
 
           # ... and clean text exits 0.
           printf 'nothing sensitive here\n' | safepaste scan -
+          # Redacted output is clean text too, which is what "composes in
+          # pipelines" means. A connection string is the case that used to
+          # fail: the URL-password rules match user:<anything>@host, and the
+          # placeholder was as good an <anything> as a real password.
+          printf 'DATABASE_URL=postgres://u:h1ghlyS3cretPw@db.internal:5432/prod\n' \
+            | safepaste redact - 2>/dev/null | safepaste scan -
           # The digest is keyed by exclusion.key, so there is no constant to
           # assert any more. What matters is the shape, that it repeats on this
           # machine, that the key it needs was created private -- and that the

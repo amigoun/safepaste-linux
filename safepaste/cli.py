@@ -42,6 +42,7 @@ from .detector import (
 from .detector.engine import DEFAULT_MAX_SCAN_BYTES, DEFAULT_REGEX_TIMEOUT
 from .detector.rules import humanise
 from . import __version__
+from .detector import DEFAULT_PLACEHOLDER
 from .redactor import (
     DEFAULT_KEEP_PREFIX,
     DEFAULT_KEEP_SUFFIX,
@@ -136,6 +137,9 @@ def _make_detector(args: argparse.Namespace) -> Detector:
         categories=categories,
         regex_timeout=args.timeout,
         max_scan_bytes=args.max_bytes,
+        # `rules` and `hash` never scan, so they carry no placeholder; scan and
+        # redact both do, which is what makes `redact | scan` exit 0.
+        placeholder=getattr(args, "placeholder", DEFAULT_PLACEHOLDER),
     )
 
 
@@ -481,6 +485,15 @@ def _build_parser() -> argparse.ArgumentParser:
     redact_p.add_argument(
         "path", nargs="?", default="-", help="file to redact, or - for stdin (default)"
     )
+    scan_p.add_argument(
+        "--placeholder",
+        default=DEFAULT_PLACEHOLDER,
+        metavar="TEXT",
+        help="text that marks an already-redacted value, which is not reported "
+        "as a finding (default: %(default)s). Match this to the --placeholder "
+        "used by redact, or `scan` will flag your own sanitised output",
+    )
+
     redact_p.add_argument(
         "--placeholder",
         default=DEFAULT_PLACEHOLDER,

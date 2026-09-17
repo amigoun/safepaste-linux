@@ -458,3 +458,87 @@ def test_summarise_labels_are_deduped_and_order_preserving(detector: Detector) -
     assert summary["secrets"] == 2
     assert summary["labels"] == ["Generic API key", "Slack bot token", "AWS access token"]
     assert len(summary["labels"]) == len(set(summary["labels"]))  # no duplicates
+
+
+# ---------------------------------------------------------------------------
+# Recognising SafePaste's own output
+# ---------------------------------------------------------------------------
+#
+# The suppression is a substring test against the secret span, which is cheap
+# and which two things could turn into a silent disaster: a placeholder short
+# enough to appear inside real secrets, and a placeholder sitting next to a
+# real secret rather than in place of one. Both are pinned below.
+
+
+def test_a_placeholder_in_the_secret_span_is_not_a_finding(ruleset) -> None:
+    detector = Detector(ruleset=ruleset)
+    text = "DATABASE_URL=postgres://svc_user:[REDACTED]@db.internal:5432/prod"
+
+    assert detector.scan(text) == []
+
+
+def test_a_custom_placeholder_is_honoured(ruleset) -> None:
+    """Whatever the user set must be recognised, not just the default."""
+    text = "DATABASE_URL=postgres://svc_user:<<HIDDEN>>@db.internal:5432/prod"
+
+    assert Detector(ruleset=ruleset, placeholder="<<HIDDEN>>").scan(text) == []
+    # ...and the default placeholder does not excuse someone else's marker.
+    assert Detector(ruleset=ruleset).scan(text) != []
+
+
+def test_a_placeholder_beside_a_real_secret_does_not_excuse_it(ruleset) -> None:
+    """Checked against the secret span, not the whole line.
+
+    A line that carries one redacted value and one live one must still report
+    the live one, or sanitising a file once would blind the scanner to
+    everything sharing a line with the result.
+    """
+    detector = Detector(ruleset=ruleset)
+    text = (
+        "OLD_TOKEN=[REDACTED]\n"
+        "NEW_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n"
+    )
+
+    found = detector.scan(text)
+    assert found, "the live token must still be reported"
+    assert all("[REDACTED]" not in text[f.start : f.end] for f in found)
+
+
+def test_a_placeholder_too_short_to_be_safe_suppresses_nothing(ruleset, caplog) -> None:
+    """A one-character placeholder would match inside almost every secret.
+
+    Suppressing on it would switch detection off and report "no secrets
+    found", which is the worst thing a scanner can do. It is refused, loudly.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        detector = Detector(ruleset=ruleset, placeholder="X")
+
+    assert detector._suppress_placeholder is False
+    assert "shorter than" in caplog.text
+
+    text = "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z"
+    assert detector.scan(text), "a short placeholder must not disable detection"
+
+
+def test_an_empty_placeholder_suppresses_nothing(ruleset) -> None:
+    """"" is a substring of every string; honouring it would find nothing."""
+    detector = Detector(ruleset=ruleset, placeholder="")
+
+    assert detector._suppress_placeholder is False
+    assert detector.scan("GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z")
+
+
+def test_the_config_default_placeholder_matches_the_detectors() -> None:
+    """The literal is written twice, so this is what keeps it honest.
+
+    Config cannot import the detector without dragging rule loading and
+    `regex` into every config read, so the default lives in two places. Two
+    copies are fine; two *different* copies would mean the shipped default
+    redaction is not the one detection knows to ignore.
+    """
+    from safepaste.config import Config
+    from safepaste.detector import DEFAULT_PLACEHOLDER
+
+    assert Config().placeholder == DEFAULT_PLACEHOLDER

@@ -161,6 +161,9 @@ class Guard:
             exclusion_key=self._cached_exclusion_key or config_mod.load_exclusion_key(),
             regex_timeout=self.config.regex_timeout,
             max_scan_bytes=self.config.max_scan_bytes,
+            # So a user who changed the placeholder still gets their own
+            # redactions recognised rather than flagged back at them.
+            placeholder=self.config.placeholder,
         )
 
     def _exclusion_key(self) -> bytes | None:
