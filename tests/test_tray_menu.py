@@ -17,6 +17,8 @@ import pytest
 # so skipping is the honest outcome rather than a failure.
 pytest.importorskip("gi", reason="python3-gi not installed; the tray cannot exist")
 
+from conftest import ABOUT_LABEL, QUIT_LABEL  # noqa: E402
+
 from gi.repository import GLib  # noqa: E402
 
 from safepaste.config import MODES  # noqa: E402
@@ -109,8 +111,8 @@ def test_the_menu_contains_the_expected_actions(tray: TrayIndicator) -> None:
     assert "Protection" in labels
     assert "Pause 15 minutes" in labels
     assert "Preferences…" in labels
-    assert "About SafePaste" in labels
-    assert "Quit" in labels
+    assert ABOUT_LABEL in labels
+    assert QUIT_LABEL in labels
 
 
 def test_clicking_about_fires_the_about_callback() -> None:
@@ -125,7 +127,7 @@ def test_clicking_about_fires_the_about_callback() -> None:
     node = next(
         c
         for c in tray._build_tree()["children"]
-        if c["props"].get("label") == "About SafePaste"
+        if c["props"].get("label") == ABOUT_LABEL
     )
     tray._fire_action(node["id"])
     assert fired == ["about"]

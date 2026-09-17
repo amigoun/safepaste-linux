@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import ABOUT_LABEL, QUIT_LABEL
 from safepaste.backend import (
     ClipboardEvent,
     ClipboardMonitor,
@@ -569,8 +570,8 @@ def test_the_tray_menu_matches_the_linux_one() -> None:
         "Pause 15 minutes",
         "Pause 1 hour",
         "Preferences…",
-        "About SafePaste",
-        "Quit",
+        ABOUT_LABEL,
+        QUIT_LABEL,
     ):
         assert expected in labels, f"{expected!r} missing from the Windows tray menu"
 

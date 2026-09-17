@@ -42,6 +42,17 @@ _MISSING = {
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
+    # Answered here rather than in either front end, so it works on a platform
+    # that has no service at all and without importing GLib or AppKit -- which
+    # are the two things most likely to be the reason somebody is trying to
+    # find out which version they have. Spelled only in full: the front ends
+    # take -v for --verbose, and a -V sitting next to it is a trap.
+    if "--version" in args:
+        from . import __version__  # noqa: PLC0415
+
+        print(f"safepaste {__version__}")
+        return 0
+
     try:
         if sys.platform.startswith("linux"):
             # The GLib/D-Bus front end: the XFIXES monitor watches an fd, and the

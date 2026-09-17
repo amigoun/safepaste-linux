@@ -695,6 +695,7 @@ class Tray:
         Mirrors the Linux tray's structure deliberately -- same actions, same order,
         same wording -- so the product feels like one thing across platforms.
         """
+        from .. import __version__
         from ..config import MODES
 
         status = (
@@ -726,8 +727,10 @@ class Tray:
             items.append(("action", "Resume protection", {"action": "resume"}))
         items.append(("separator", "", {}))
         items.append(("action", "Preferences…", {"action": "preferences"}))
-        items.append(("action", "About SafePaste", {"action": "about"}))
-        items.append(("action", "Quit", {"action": "quit"}))
+        items.append(
+            ("action", f"About SafePaste {__version__}", {"action": "about"})
+        )
+        items.append(("action", "Quit SafePaste", {"action": "quit"}))
         return items
 
     def _show_menu(self) -> None:

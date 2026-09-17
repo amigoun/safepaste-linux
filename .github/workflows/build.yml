@@ -92,6 +92,13 @@ jobs:
           # The rule data is the product, and a wheel without it installs cleanly,
           # runs and finds nothing. Assert the count, not just that the binary runs.
           /tmp/pipvenv/bin/safepaste rules --stats | grep -qE '^total rules: [0-9]{3}$'
+
+          # The installed package must report the version in the tree it was
+          # built from. Checked against __init__.py rather than a literal, so
+          # this step needs no editing at release time.
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' safepaste/__init__.py)
+          test "$(/tmp/pipvenv/bin/safepaste --version)" = "safepaste $version"
+          test "$(/tmp/pipvenv/bin/safepaste-daemon --version)" = "safepaste $version"
           printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
             | /tmp/pipvenv/bin/safepaste redact - 2>/dev/null \
             | grep -q 'GITHUB_TOKEN=.*\[REDACTED\]'

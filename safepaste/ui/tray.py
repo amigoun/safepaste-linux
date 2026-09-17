@@ -39,6 +39,7 @@ import gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
+from .. import __version__
 from ..config import MODES
 
 log = logging.getLogger(__name__)
@@ -795,10 +796,14 @@ class TrayIndicator:
                 },
                 {
                     "id": self._ID_ABOUT,
-                    "props": {"label": "About SafePaste"},
+                    "props": {"label": f"About SafePaste {__version__}"},
                     "children": [],
                 },
-                {"id": self._ID_QUIT, "props": {"label": "Quit"}, "children": []},
+                {
+                    "id": self._ID_QUIT,
+                    "props": {"label": "Quit SafePaste"},
+                    "children": [],
+                },
             ],
         }
 

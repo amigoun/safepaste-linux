@@ -126,8 +126,9 @@ printing an import traceback.
 ## Usage
 
 - **Tray icon** — current state at a glance, plus mode switching, *Pause 15
-  minutes*, *Sanitise clipboard now*, Preferences, *About SafePaste* (which
-  opens this repository) and Quit.
+  minutes*, *Sanitise clipboard now*, Preferences, *About SafePaste 0.9.0*
+  (which names the installed version and opens this repository) and *Quit
+  SafePaste*.
 - **Ctrl+Alt+V** — sanitise whatever is on the clipboard right now, on demand.
 - **Preferences** — protection mode, how long *Restore original* stays available,
   the replacement text, and which categories of secret to look for.
@@ -149,7 +150,14 @@ active by default: 231  opt-in: 1  vetoed: 0
 
 $ printf 'hunter2' | safepaste hash          # for hand-writing an exclusion
 hmac-sha256:eaea80387563e7a3765f0ca373b2a37c354de218d2c2f01082e773f3806f7151
+
+$ safepaste --version                       # and the same on safepaste-daemon
+safepaste 0.9.0
 ```
+
+`safepaste-daemon --version` answers before it works out which front end to
+load, so it reports a version even on a platform where the service cannot
+start — which is usually when you want to know.
 
 `scan` exits 1 when it finds something and 0 when clean, so it composes in
 pipelines. `--json` output carries rule ids, offsets and entropy — never the

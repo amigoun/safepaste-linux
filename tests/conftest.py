@@ -4,8 +4,21 @@ from __future__ import annotations
 
 import pytest
 
+from safepaste import __version__
 from safepaste.detector import Detector
 from safepaste.detector.rules import RuleSet, load_default
+
+# The two menu labels that must read identically on all three platforms, named
+# once here because that is exactly what drifted: macOS said "Quit SafePaste"
+# while Linux and Windows said "Quit". The three trays are separate
+# implementations -- two share a tuple list, Linux builds a DBusMenu tree with a
+# Protection submenu -- so their structures cannot be compared directly, but
+# their wording can.
+#
+# About carries the installed version, which outside the CLI is the only place
+# a user can see it.
+ABOUT_LABEL = f"About SafePaste {__version__}"
+QUIT_LABEL = "Quit SafePaste"
 
 
 def pytest_configure(config: pytest.Config) -> None:
