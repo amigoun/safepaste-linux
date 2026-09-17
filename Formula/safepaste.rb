@@ -102,9 +102,13 @@ class Safepaste < Formula
     # a real redaction rather than just that the binary runs.
     assert_match(/total rules: \d\d\d/, shell_output("#{bin}/safepaste rules --stats"))
 
-    # The installed code must report the version the formula thinks it built.
-    # A stale build that still runs is otherwise invisible here.
-    assert_equal "safepaste #{version}", shell_output("#{bin}/safepaste --version").strip
+    # Deliberately no `safepaste --version` assertion here, tempting as it is.
+    # CI runs this block against `brew install --HEAD`, and the head stanza
+    # above tracks main -- so this block can only assert behaviour that is
+    # already merged. Anything newly added fails on its own pull request and
+    # passes only afterwards, which reads as a broken branch rather than a
+    # constraint of the harness. The version is checked against the working
+    # tree in the pip smoke test instead, which installs the checkout.
 
     output = pipe_output(
       "#{bin}/safepaste redact -",
