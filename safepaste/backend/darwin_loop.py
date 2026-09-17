@@ -117,6 +117,9 @@ class RunLoop:
             # Accessory: a menu-bar presence with no Dock icon and no menu bar of
             # its own, which is what a background utility should be.
             self._app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+            # [NSApp run] would normally send this. We pump by hand, so nothing
+            # else will, and AppKit is not fully initialised until it arrives.
+            self._app.finishLaunching()
             self._ok = True
         except Exception as exc:  # noqa: BLE001 - PyObjC raises assorted types
             log.warning("could not initialise NSApplication: %s", exc)
@@ -133,12 +136,30 @@ class RunLoop:
         if not self._ok:
             return True
         try:
-            from Foundation import NSDate, NSDefaultRunLoopMode, NSRunLoop
+            from AppKit import NSEventMaskAny  # noqa: PLC0415
+            from Foundation import NSDate, NSDefaultRunLoopMode  # noqa: PLC0415
 
-            NSRunLoop.currentRunLoop().runMode_beforeDate_(
-                NSDefaultRunLoopMode,
-                NSDate.dateWithTimeIntervalSinceNow_(self._slice),
-            )
+            # NSRunLoop.runMode_beforeDate_ services run-loop sources and timers
+            # but never touches NSApplication's event queue, and a click on a
+            # status item arrives there as an NSEvent. Pumping the run loop alone
+            # therefore draws the icon and silently discards every click on it.
+            # Only nextEventMatchingMask/sendEvent_ dispatches them.
+            deadline = NSDate.dateWithTimeIntervalSinceNow_(self._slice)
+            drain_now = NSDate.date()
+            blocking = True
+            while True:
+                # Block once for the slice so a click is picked up promptly, then
+                # drain whatever else is queued without waiting again.
+                event = self._app.nextEventMatchingMask_untilDate_inMode_dequeue_(
+                    NSEventMaskAny,
+                    deadline if blocking else drain_now,
+                    NSDefaultRunLoopMode,
+                    True,
+                )
+                blocking = False
+                if event is None:
+                    break
+                self._app.sendEvent_(event)
         except Exception as exc:  # noqa: BLE001
             log.debug("run loop pump failed: %s", exc)
         return True
@@ -148,13 +169,26 @@ class RunLoop:
         return self._ok
 
 
+_MENU_TARGET_CLASS: Any = None
+
+
 def _menu_target_class() -> Any:
     """Build the Objective-C object that NSMenuItem actions target.
 
     Defined inside a function because the class body needs Foundation imported, and
     importing that at module scope would make this module unloadable off a Mac —
     which the tests here depend on.
+
+    Cached, and that is not an optimisation. An Objective-C class name is a
+    process-wide registration, so evaluating this class body a second time raises
+    "SafePasteMenuTarget is overriding existing Objective-C class". _apply_menu
+    runs on every refresh, so without the cache every refresh after the first
+    raised before reaching setMenu_, leaving the menu frozen at its startup state.
     """
+    global _MENU_TARGET_CLASS
+    if _MENU_TARGET_CLASS is not None:
+        return _MENU_TARGET_CLASS
+
     import objc  # noqa: PLC0415
     from Foundation import NSObject
 
@@ -175,6 +209,7 @@ def _menu_target_class() -> Any:
                 except Exception:  # noqa: BLE001 - never let a click kill the app
                     logging.getLogger(__name__).exception("menu action failed")
 
+    _MENU_TARGET_CLASS = SafePasteMenuTarget
     return SafePasteMenuTarget
 
 
@@ -338,7 +373,10 @@ class Tray:
             self._apply_icon()
             self._apply_menu()
         except Exception as exc:  # noqa: BLE001
-            log.debug("status item refresh failed: %s", exc)
+            # Warning, not debug: a silent failure here leaves a menu that still
+            # looks right but no longer reflects the guard's state, and the only
+            # symptom is a tray that quietly stops updating.
+            log.warning("status item refresh failed: %s", exc)
 
     def _apply_icon(self) -> None:
         from AppKit import NSImage
