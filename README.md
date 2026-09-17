@@ -152,7 +152,7 @@ $ printf 'hunter2' | safepaste hash          # for hand-writing an exclusion
 hmac-sha256:eaea80387563e7a3765f0ca373b2a37c354de218d2c2f01082e773f3806f7151
 
 $ safepaste --version                       # and the same on safepaste-daemon
-safepaste 0.10.0
+safepaste 0.10.1
 ```
 
 `safepaste-daemon --version` answers before it works out which front end to
