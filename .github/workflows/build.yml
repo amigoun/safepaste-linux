@@ -94,7 +94,7 @@ jobs:
           /tmp/pipvenv/bin/safepaste rules --stats | grep -qE '^total rules: [0-9]{3}$'
           printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
             | /tmp/pipvenv/bin/safepaste redact - 2>/dev/null \
-            | grep -qF 'GITHUB_TOKEN=[REDACTED]'
+            | grep -q 'GITHUB_TOKEN=.*\[REDACTED\]'
           test -x /tmp/pipvenv/bin/safepaste-daemon
 
           # PyGObject is not a declared dependency on purpose (it builds against
@@ -195,7 +195,7 @@ jobs:
           # Independently of brew's own test block, from the installed prefix:
           safepaste rules --stats
           printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
-            | safepaste redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=\[REDACTED\]'
+            | safepaste redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=.*\[REDACTED\]'
           test -x "$(brew --prefix)/bin/safepaste-daemon"
           brew uninstall local/safepaste/safepaste
 
@@ -230,7 +230,7 @@ jobs:
           set -eux
           python3 -m safepaste rules --stats
           printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
-            | python3 -m safepaste redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=\[REDACTED\]'
+            | python3 -m safepaste redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=.*\[REDACTED\]'
           # The service dispatcher must pick the polling shell, not the GLib daemon.
           python3 -c "
           import sys
@@ -300,7 +300,7 @@ jobs:
           grep -qE 'total rules: 2[0-9][0-9]' /tmp/rules.txt
           # And that it actually detects, from the frozen bundle.
           printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
-            | "$exe" redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=\[REDACTED\]'
+            | "$exe" redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=.*\[REDACTED\]'
           test -f "dist/windows/safepaste-daemon/safepaste-daemon.exe"
 
       - name: Package the portable archive
@@ -360,8 +360,11 @@ jobs:
             throw "the installed build has no rules: $stats"
           }
           $out = ("GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z" | & $shim redact -) | Out-String
-          if ($out -notmatch [regex]::Escape("GITHUB_TOKEN=[REDACTED]")) {
+          if ($out -notmatch "GITHUB_TOKEN=.*\[REDACTED\]") {
             throw "the installed build did not redact: $out"
+          }
+          if ($out -match [regex]::Escape("ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z")) {
+            throw "the installed build left the secret intact: $out"
           }
           if (-not (Test-Path "$env:USERPROFILE\scoop\shims\safepaste-daemon.exe")) {
             throw "the manifest did not shim safepaste-daemon"
@@ -383,7 +386,7 @@ jobs:
           set -eux
           python -m safepaste rules --stats
           printf 'GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n' \
-            | python -m safepaste redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=\[REDACTED\]'
+            | python -m safepaste redact - 2>/dev/null | grep -q 'GITHUB_TOKEN=.*\[REDACTED\]'
           python -c "
           import sys
           assert sys.platform == 'win32', sys.platform
@@ -447,7 +450,15 @@ jobs:
           # ... redacted value-only, surrounding text intact ...
           out=$(printf 'keep\nGITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\nkeep\n' \
             | safepaste redact - 2>/dev/null)
-          test "$out" = "$(printf 'keep\nGITHUB_TOKEN=[REDACTED]\nkeep')"
+          # Asserted as: the neighbouring lines survive byte-identical, line 2
+          # carries a placeholder, and the secret itself is gone. Pinning the
+          # exact replacement here would tie the smoke test to whatever
+          # keep_prefix/keep_suffix currently default to, which is a unit-test
+          # concern rather than a packaging one.
+          test "$(printf '%s\n' "$out" | sed -n '1p;3p')" = "$(printf 'keep\nkeep')"
+          printf '%s\n' "$out" | sed -n '2p' | grep -q '^GITHUB_TOKEN=.*\[REDACTED\]'
+          ! printf '%s\n' "$out" | grep -qF 'ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z'
+
           # ... and clean text exits 0.
           printf 'nothing sensitive here\n' | safepaste scan -
           # The digest is keyed by exclusion.key, so there is no constant to

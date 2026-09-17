@@ -196,6 +196,7 @@ class Guard:
             placeholder=self.config.placeholder,
             label_rules=self.config.label_rules,
             keep_prefix=self.config.keep_prefix,
+            keep_suffix=self.config.keep_suffix,
         )
 
     @property
