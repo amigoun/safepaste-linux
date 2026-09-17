@@ -471,3 +471,43 @@ def test_a_writer_that_holds_nothing_still_reads_normally(guard_factory) -> None
     assert guard._wants_clipboard() is True
     event = guard._read_clipboard()
     assert event is not None and event.text == PAYLOAD
+
+
+# --- redaction style reaches the redactor ---------------------------------
+
+
+def test_kept_edges_are_configurable_and_reach_the_clipboard(guard_factory) -> None:
+    """[redaction] keep_prefix/keep_suffix must survive the trip to the writer.
+
+    Worth pinning at this level rather than only in test_redactor: the style is
+    assembled in Guard.redaction_style, so a field added to RedactionStyle and
+    to Config but not wired through here would pass every redactor test and
+    still put the old text on the clipboard.
+    """
+    guard, backend, _ = guard_factory(keep_prefix=4, keep_suffix=4)
+    guard.start()
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    written = backend.writer.writes[-1]
+    assert f"{SECRET[:4]}…[REDACTED]…{SECRET[-4:]}" in written
+    assert SECRET not in written
+    assert SECRET[4:-4] not in written
+
+
+def test_zero_edges_restore_whole_value_replacement(guard_factory) -> None:
+    guard, backend, _ = guard_factory(keep_prefix=0, keep_suffix=0)
+    guard.start()
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert "GITHUB_TOKEN=[REDACTED]" in backend.writer.writes[-1]
+
+
+def test_a_negative_edge_count_is_clamped_not_honoured(guard_factory) -> None:
+    """A negative slice index would count from the end and leak the tail."""
+    guard, backend, _ = guard_factory(keep_prefix=-3, keep_suffix=-3)
+    guard.start()
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    written = backend.writer.writes[-1]
+    assert "GITHUB_TOKEN=[REDACTED]" in written
+    assert SECRET not in written

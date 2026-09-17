@@ -43,9 +43,21 @@ DATABASE_URL=postgres://svc_user:h1ghlyS3cretPw@db.internal:5432/prod
 ```
 becomes
 ```
-AWS_SECRET_ACCESS_KEY=[REDACTED]
-DATABASE_URL=postgres://svc_user:[REDACTED]@db.internal:5432/prod
+AWS_SECRET_ACCESS_KEY=wJq7…[REDACTED]…rS2u
+DATABASE_URL=postgres://svc_user:h1gh…[REDACTED]…tPw@db.internal:5432/prod
 ```
+
+A few characters survive at each end so you can tell *which* key went: the head
+carries the type (`ghp_`, `AKIA`, `ox_`), the tail tells two keys of the same
+type apart, and the entropy in between — the part worth stealing — is gone. The
+counts are `keep_prefix` and `keep_suffix` under `[redaction]`, four each by
+default, and both `0` restores the older behaviour of replacing the whole value.
+
+They are a request rather than an instruction, because they are configured once
+against no particular value while the values themselves run from a 4-character
+PIN to a 3 KB private key. Whatever is asked for, at most half of any secret is
+ever shown and at least four characters always stay hidden, so `keep_prefix = 8`
+cannot print an eight-character password. Short secrets reveal nothing at all.
 
 Other modes are available from Preferences: `ask` (leave the original, ask first),
 `notify` (notification only, clipboard untouched) and `off`.
@@ -127,7 +139,7 @@ $ printf 'AWS_SECRET_ACCESS_KEY=wJq7Kd2LmN9pRs4TvXbZ8cE1fG3hJ5kL7nQ0rS2u\n' | sa
 1:23  generic-api-key  Generic API key  (40 chars, entropy 5.12)
 
 $ echo "$SOMETHING" | safepaste redact - > clean.txt
-safepaste: redacted 1 secret(s) (40 chars replaced, 23 kept) [Generic API key]
+safepaste: redacted 1 secret(s) (32 chars replaced, 31 kept) [Generic API key]
 
 $ safepaste rules --stats
 total rules: 232

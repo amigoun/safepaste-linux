@@ -91,7 +91,10 @@ class Config:
     # --- redaction --------------------------------------------------------
     placeholder: str = "[REDACTED]"
     label_rules: bool = False
-    keep_prefix: int = 0
+    # Characters left visible at each end of a secret. Set both to 0 to replace
+    # the whole value, which is what SafePaste did before these existed.
+    keep_prefix: int = 4
+    keep_suffix: int = 4
 
     # --- detection tuning -------------------------------------------------
     regex_timeout: float = 0.25
@@ -165,6 +168,8 @@ class Config:
             self.max_scan_bytes = 1_048_576
         if self.keep_prefix < 0:
             self.keep_prefix = 0
+        if self.keep_suffix < 0:
+            self.keep_suffix = 0
         keyed = tuple(h for h in self.excluded_hashes if is_keyed_digest(h))
         unkeyed = len(self.excluded_hashes) - len(keyed)
         if unkeyed:
@@ -230,7 +235,7 @@ class Config:
 
 _SECTIONS = {
     "protection": ("mode", "restore_timeout_secs", "categories"),
-    "redaction": ("placeholder", "label_rules", "keep_prefix"),
+    "redaction": ("placeholder", "label_rules", "keep_prefix", "keep_suffix"),
     "detection": ("regex_timeout", "max_scan_bytes", "extra_rule_globs"),
     "exclusions": ("excluded_hashes",),
     "hardening": ("refuse_ptrace",),

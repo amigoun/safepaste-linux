@@ -41,7 +41,13 @@ from .detector import (
 )
 from .detector.engine import DEFAULT_MAX_SCAN_BYTES, DEFAULT_REGEX_TIMEOUT
 from .detector.rules import humanise
-from .redactor import DEFAULT_PLACEHOLDER, RedactionStyle, redact
+from .redactor import (
+    DEFAULT_KEEP_PREFIX,
+    DEFAULT_KEEP_SUFFIX,
+    DEFAULT_PLACEHOLDER,
+    RedactionStyle,
+    redact,
+)
 
 log = logging.getLogger(__name__)
 
@@ -206,6 +212,7 @@ def cmd_redact(args: argparse.Namespace) -> int:
         placeholder=args.placeholder,
         label_rules=args.label_rules,
         keep_prefix=args.keep_prefix,
+        keep_suffix=args.keep_suffix,
     )
     result = redact(text, findings, style)
 
@@ -478,9 +485,19 @@ def _build_parser() -> argparse.ArgumentParser:
     redact_p.add_argument(
         "--keep-prefix",
         type=int,
-        default=0,
+        default=DEFAULT_KEEP_PREFIX,
         metavar="N",
-        help="keep the first N characters of each secret before the placeholder",
+        help="keep the first N characters of each secret (default: %(default)s; "
+        "0 to reveal nothing)",
+    )
+    redact_p.add_argument(
+        "--keep-suffix",
+        type=int,
+        default=DEFAULT_KEEP_SUFFIX,
+        metavar="N",
+        help="keep the last N characters of each secret (default: %(default)s; "
+        "0 to reveal nothing). Both are lowered for a secret short enough that "
+        "honouring them would print most of it",
     )
     redact_p.set_defaults(func=cmd_redact)
 
