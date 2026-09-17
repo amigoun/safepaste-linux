@@ -30,6 +30,17 @@ import regex
 from . import entropy as entropy_mod
 from .rules import CATEGORY_LABELS, Rule, RuleSet, load_default
 
+# What SafePaste's own output looks like. Defined here rather than in the
+# redactor because the detector is what has to recognise it: redactor imports
+# from this module, so the constant cannot live there without a cycle.
+DEFAULT_PLACEHOLDER = "[REDACTED]"
+
+# A placeholder shorter than this is not used to suppress anything. The check is
+# a substring test, so a one-character placeholder would match inside nearly
+# every secret and quietly switch detection off altogether -- the worst failure
+# available to a scanner, and one that would look like "no secrets found".
+MIN_SUPPRESSING_PLACEHOLDER = 3
+
 log = logging.getLogger(__name__)
 
 # Clipboards can hold megabytes (a copied spreadsheet, a base64 image). Scanning
@@ -108,6 +119,7 @@ class Detector:
         exclusion_key: bytes | None = None,
         regex_timeout: float = DEFAULT_REGEX_TIMEOUT,
         max_scan_bytes: int = DEFAULT_MAX_SCAN_BYTES,
+        placeholder: str = DEFAULT_PLACEHOLDER,
     ) -> None:
         self.ruleset = ruleset if ruleset is not None else load_default()
         self.categories = categories
@@ -135,11 +147,37 @@ class Detector:
             )
         self.regex_timeout = regex_timeout
         self.max_scan_bytes = max_scan_bytes
+        self.placeholder = placeholder
+        # Worked out once rather than per match, and reported, because a
+        # placeholder too short to use means redacted text starts being flagged
+        # again and nothing else would say why.
+        self._suppress_placeholder = len(placeholder) >= MIN_SUPPRESSING_PLACEHOLDER
+        if placeholder and not self._suppress_placeholder:
+            log.warning(
+                "placeholder %r is shorter than %d characters, so already-redacted "
+                "text will be flagged again rather than risk suppressing real "
+                "findings by matching inside them",
+                placeholder,
+                MIN_SUPPRESSING_PLACEHOLDER,
+            )
         self._active = self.ruleset.enabled_for(categories)
 
     @property
     def active_rules(self) -> list[Rule]:
         return self._active
+
+    def _is_already_redacted(self, secret: str) -> bool:
+        """Whether this value is something SafePaste has already replaced.
+
+        The URL-password rules are why this exists: they match any
+        `user:<something>@host`, and "[REDACTED]" is as good a `<something>` as
+        a real password, so a sanitised connection string was flagged again
+        every time it was rescanned. That broke the promise that `scan` exits 0
+        on clean text -- a redacted value is clean by construction -- and meant
+        re-copying a sanitised URL raised a second dialog about a secret that
+        was no longer there.
+        """
+        return self._suppress_placeholder and self.placeholder in secret
 
     def _secret_span(self, m: regex.Match, rule: Rule) -> tuple[int, int] | None:
         """Which slice of the match is the secret itself.
@@ -219,6 +257,11 @@ class Detector:
                 if span is None:
                     continue
                 secret = text[span[0] : span[1]]
+                # Our own output is not a finding. Checked against the secret
+                # span rather than the whole match on purpose: a placeholder
+                # elsewhere on the line must not excuse a real secret beside it.
+                if self._is_already_redacted(secret):
+                    continue
                 if not entropy_mod.passes(secret, rule.entropy):
                     continue
                 if self._is_excluded(secret):

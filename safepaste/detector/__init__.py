@@ -1,6 +1,7 @@
 """Secret detection: Gitleaks-compatible rules, plus SafePaste's own."""
 
 from .engine import (
+    DEFAULT_PLACEHOLDER,
     EXCLUSION_SCHEME,
     Detector,
     Finding,

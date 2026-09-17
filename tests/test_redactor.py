@@ -270,34 +270,39 @@ def test_edges_can_be_turned_off_entirely(detector: Detector) -> None:
     assert redact(text, detector.scan(text), FULL).text == "GITHUB_TOKEN=[REDACTED]"
 
 
-def test_kept_edges_do_not_make_the_output_any_dirtier_on_rescan(
-    detector: Detector,
-) -> None:
-    """The surviving fragments must not trip a detector that full redaction did not.
+def test_a_redacted_value_rescans_clean(detector: Detector) -> None:
+    """Redacting must be a fixed point: sanitised text holds no findings.
 
-    Deliberately a comparison against full redaction rather than an assertion
-    that the output rescans clean, because it does not: the URL-password rules
-    match any `user:<something>@host`, and "[REDACTED]" satisfies that as well
-    as a real password does. That predates kept edges and is unchanged by them
-    -- what this pins is that keeping a head and a tail introduces no *new*
-    detection, which is the part this feature could plausibly have broken.
+    This used to be false, and the test here asserted only that kept edges
+    added no *new* detections. The URL-password rules match any
+    `user:<something>@host`, and "[REDACTED]" was as good a `<something>` as a
+    real password, so a sanitised connection string was flagged every time it
+    came back round -- `scan` exited 1 on its own clean output, and re-copying
+    a redacted URL raised a second dialog about a secret that was no longer
+    there. The detector now recognises its own placeholder.
     """
     for text in (
         "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z",
         "AWS_SECRET_ACCESS_KEY=wJq7Kd2LmN9pRs4TvXbZ8cE1fG3hJ5kL7nQ0rS2u",
         "DATABASE_URL=postgres://svc_user:h1ghlyS3cretPw@db.internal:5432/prod",
         "SLACK_TOKEN=xoxb-8237456190-8123456789012-Kj83hDbQmZpLxNc9RstV",
+        "https://user:hunter2ZZZqqq@example.com/x",
     ):
-        findings = detector.scan(text)
-        with_edges = redact(text, findings)
-        whole = redact(text, findings, FULL)
-        assert with_edges.changed
+        for style in (None, FULL):
+            result = redact(text, detector.scan(text), style)
+            assert result.changed, f"nothing detected in {text!r}"
+            assert detector.scan(result.text) == [], (
+                f"rescan flagged {result.text!r}"
+            )
 
-        after_edges = {f.rule_id for f in detector.scan(with_edges.text)}
-        after_whole = {f.rule_id for f in detector.scan(whole.text)}
-        assert after_edges <= after_whole, (
-            f"kept edges added {after_edges - after_whole} on {text!r}"
-        )
 
-        # And in particular, no token rule fires on the fragments themselves.
-        assert "generic-api-key" not in after_edges
+def test_redacting_twice_changes_nothing_the_second_time(detector: Detector) -> None:
+    """The practical form of the same property, and what the guard relies on."""
+    text = "DATABASE_URL=postgres://svc_user:h1ghlyS3cretPw@db.internal:5432/prod"
+
+    once = redact(text, detector.scan(text))
+    twice = redact(once.text, detector.scan(once.text))
+
+    assert once.changed
+    assert not twice.changed
+    assert twice.text == once.text

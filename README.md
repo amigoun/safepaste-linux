@@ -160,8 +160,23 @@ load, so it reports a version even on a platform where the service cannot
 start — which is usually when you want to know.
 
 `scan` exits 1 when it finds something and 0 when clean, so it composes in
-pipelines. `--json` output carries rule ids, offsets and entropy — never the
-secret value.
+pipelines — including with itself: redacting is a fixed point, and scanning
+sanitised output exits 0. The detector recognises the placeholder, so a
+sanitised connection string is not flagged for still looking like
+`user:something@host`. Change the placeholder and `scan` needs to be told, or
+it will report your own output:
+
+```sh
+safepaste redact - --placeholder '<<HIDDEN>>' \
+  | safepaste scan - --placeholder '<<HIDDEN>>'
+```
+
+The daemon takes this from `placeholder` under `[redaction]`, so it only
+matters on the command line. A placeholder under three characters is not used
+for this at all and says so in the log — it would match inside real secrets and
+turn detection off while still reporting success.
+
+`--json` output carries rule ids, offsets and entropy — never the secret value.
 
 ## How it works on Wayland
 
