@@ -106,7 +106,11 @@ class Safepaste < Formula
       "#{bin}/safepaste redact -",
       "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n",
     )
-    assert_match "GITHUB_TOKEN=[REDACTED]", output
+    assert_match(/GITHUB_TOKEN=.*\[REDACTED\]/, output)
+    # The placeholder alone is not the claim worth making -- the secret being
+    # gone is. A few characters at each end survive by default, so this is a
+    # refutation of the whole value rather than of any fragment.
+    refute_match "ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z", output
 
     # Clean text must pass through untouched and exit 0.
     assert_equal 0, shell_output("echo 'nothing here' | #{bin}/safepaste scan -; echo $?").to_i
