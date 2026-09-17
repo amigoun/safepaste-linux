@@ -169,3 +169,22 @@ def test_the_macos_about_item_shows_the_version() -> None:
     labels = [label for _k, label, _a in Tray(_Loop()).build_menu_items()]
     assert ABOUT_LABEL in labels
     assert __import__("safepaste").__version__ in ABOUT_LABEL
+
+
+def test_the_readme_transcript_shows_the_current_version() -> None:
+    """The README prints `safepaste --version` output, so it can go stale.
+
+    Caught the same way the homepage is: by asserting the duplicate rather
+    than trusting whoever cuts the release to remember. The prose elsewhere
+    deliberately carries no version at all, which is why only the console
+    transcript is checked here.
+    """
+    import safepaste
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    assert f"safepaste {safepaste.__version__}" in readme, (
+        "README's --version transcript is stale; it should read "
+        f"'safepaste {safepaste.__version__}'"
+    )
