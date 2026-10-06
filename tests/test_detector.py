@@ -188,6 +188,43 @@ def test_false_positive_corpus_yields_no_findings(detector: Detector, text: str)
 
 
 # ---------------------------------------------------------------------------
+# UUID-shaped vendor keys: noise to the catch-all rules, the format to these
+# ---------------------------------------------------------------------------
+
+_UUID = "3f6b2c1e-8d4a-4f7b-9c2e-1a5d7e9b0c4f"
+
+
+@pytest.mark.parametrize(
+    ("name", "rule_id"),
+    [
+        ("HEROKU_API_KEY", "heroku-api-key"),
+        ("HUBSPOT_API_KEY", "hubspot-api-key"),
+        ("KUCOIN_SECRET_KEY", "kucoin-secret-key"),
+        ("MESSAGEBIRD_CLIENT_ID", "messagebird-client-id"),
+        ("SENDBIRD_APP_ID", "sendbird-access-id"),
+        ("SNYK_TOKEN", "snyk-api-token"),
+        ("SQUARESPACE_ACCESS_TOKEN", "squarespace-access-token"),
+    ],
+)
+def test_a_uuid_shaped_vendor_key_is_found(
+    detector: Detector, name: str, rule_id: str
+) -> None:
+    text = f"{name}={_UUID}"
+    found = [f for f in detector.scan(text) if f.rule_id == rule_id]
+    assert [text[f.start : f.end] for f in found] == [_UUID]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [f"idempotency_key={_UUID}", f"trace token={_UUID}", "api_key=a1b2c3d4"],
+)
+def test_a_uuid_or_short_sha_under_a_generic_name_is_still_not_flagged(
+    detector: Detector, text: str
+) -> None:
+    assert detector.scan(text) == []
+
+
+# ---------------------------------------------------------------------------
 # Passwords inside URLs
 # ---------------------------------------------------------------------------
 

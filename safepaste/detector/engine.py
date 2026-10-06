@@ -321,7 +321,7 @@ class Detector:
                 if any(a.excludes(secret, whole, line) for a in rule.allowlists):
                     continue
                 if any(
-                    a.excludes(secret, whole, line)
+                    a.applies_to(rule.id) and a.excludes(secret, whole, line)
                     for a in self.ruleset.global_allowlists
                 ):
                     continue

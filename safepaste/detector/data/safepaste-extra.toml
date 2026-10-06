@@ -31,7 +31,16 @@ regexes = [
     '''^\$(?:\w+|\{\w+\}|\(\w+\))$''',
     '''^(?:process\.env|os\.environ|ENV)\[?[\w'".\]]+$''',
     '''^<[\w\s-]{1,40}>$''',
-    # A pasted git object or UUID is not a credential.
+]
+
+[[allowlists]]
+description = "identifiers that are not credentials, to the catch-all rules"
+# A pasted git object or UUID is not a credential -- to a rule that fires on
+# any key-ish name or any random-looking run. It is scoped to those because
+# Heroku, HubSpot, KuCoin, MessageBird, Sendbird, Snyk and Squarespace all issue
+# UUID-shaped keys: as a global entry this switched every one of their rules off.
+targetRules = ["generic-api-key", "safepaste-high-entropy-string"]
+regexes = [
     '''^[0-9a-f]{7,8}$''',
     '''^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$''',
 ]

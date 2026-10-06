@@ -440,3 +440,11 @@ def test_the_vendored_file_still_carries_the_pattern_being_corrected() -> None:
 
     vendored = GITLEAKS_TOML.read_text(encoding="utf-8")
     assert "(?i)^true|false|null$" in vendored
+
+
+def test_a_global_allowlist_with_target_rules_spares_every_other_rule() -> None:
+    al = Allowlist.from_toml({"targetRules": ["generic-api-key"], "regexes": ["^x$"]})
+
+    assert al.applies_to("generic-api-key")
+    assert not al.applies_to("heroku-api-key")
+    assert Allowlist.from_toml({"regexes": ["^x$"]}).applies_to("heroku-api-key")

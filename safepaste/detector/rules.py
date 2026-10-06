@@ -218,6 +218,9 @@ class Allowlist:
       contributes nothing; under AND it renders the whole allowlist inert. Both
       matter — upstream's generic-api-key has an AND allowlist whose regexes
       would otherwise suppress any secret sitting on a `LICENSE=` line.
+    * `targetRules`, on a global allowlist, limits it to the rules named. A
+      shape that is noise to a catch-all rule can be the exact format of a
+      vendor's key, and a global exemption for it switches that vendor off.
     """
 
     regexes: tuple[regex.Pattern, ...] = ()
@@ -225,6 +228,11 @@ class Allowlist:
     target: str = "secret"
     condition: str = "OR"
     path_scoped: bool = False
+    # Empty means every rule.
+    target_rules: frozenset[str] = frozenset()
+
+    def applies_to(self, rule_id: str) -> bool:
+        return not self.target_rules or rule_id in self.target_rules
 
     def excludes(self, secret: str, match: str, line: str) -> bool:
         subject = {"secret": secret, "match": match, "line": line}.get(
@@ -273,6 +281,7 @@ class Allowlist:
             target=target,
             condition=condition,
             path_scoped=bool(raw.get("paths")),
+            target_rules=frozenset(_string_list(raw, "targetRules")),
         )
 
 
