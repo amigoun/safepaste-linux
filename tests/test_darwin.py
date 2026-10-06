@@ -750,6 +750,55 @@ def test_a_raising_clipboard_check_does_not_stop_the_shell(
     assert len(caplog.records) == 1
 
 
+class _RecordingTray:
+    def __init__(self, **_callbacks) -> None:
+        self.states: list[tuple[str, bool]] = []
+
+    def start(self) -> bool:
+        return True
+
+    def stop(self) -> None:
+        pass
+
+    def set_state(self, mode: str, paused: bool) -> None:
+        self.states.append((mode, paused))
+
+    def set_alert(self, secrets: int, removed: bool | None = None) -> None:
+        pass
+
+    def clear_alert(self) -> None:
+        pass
+
+
+def test_the_tray_stops_saying_paused_when_the_pause_lapses(tmp_path, monkeypatch) -> None:
+    import time
+
+    import safepaste.config as config_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    tray = _RecordingTray()
+    backend = DarwinBackend(pasteboard=FakePasteboard({UTI_STRING: "quiet"}))
+    monkeypatch.setattr(backend, "tray", lambda **_cb: tray)
+    monkeypatch.setattr(backend, "hotkey_binder", lambda on_pressed=None: None)
+    shell = PollingShell(
+        config_mod.Config(mode="redact").validated(),
+        backend=backend,
+        notify=lambda _t, _b: True,
+    )
+    shell._attach_platform_extras()
+    shell._set_paused(True, 900)
+    assert tray.states[-1] == ("redact", True)
+
+    later = time.monotonic() + 901
+    monkeypatch.setattr(time, "monotonic", lambda: later)
+    shell.timer.run_due()
+    assert tray.states[-1] == ("redact", False)
+
+
 def test_sleep_timer_fires_due_callbacks_only() -> None:
     from safepaste.shell import _SleepTimer
 

@@ -84,6 +84,8 @@ class PollingShell:
         # Handle of the pending "N secrets removed" expiry, so a newer detection
         # restarts the clock instead of inheriting the old one.
         self._alert_handle: Any = None
+        # Handle of the repaint due when a timed pause lapses.
+        self._pause_handle: Any = None
         self.notify = notify if notify is not None else _default_notifier()
         self.guard = Guard(
             cfg,
@@ -196,6 +198,17 @@ class PollingShell:
 
     def _set_paused(self, paused: bool, seconds: int) -> None:
         self.guard.set_paused(paused, seconds)
+        if self._pause_handle is not None:
+            self.timer.cancel(self._pause_handle)
+            self._pause_handle = None
+        if paused and seconds:
+            # The pause ends by itself, with nothing to say so; come back then, or
+            # the icon goes on reading "Paused" over a guard that is protecting.
+            self._pause_handle = self.timer.schedule(seconds, self._on_pause_lapsed)
+        self._refresh_tray()
+
+    def _on_pause_lapsed(self) -> None:
+        self._pause_handle = None
         self._refresh_tray()
 
     def _refresh_tray(self) -> None:
