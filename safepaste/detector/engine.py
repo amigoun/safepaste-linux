@@ -306,13 +306,23 @@ class Detector:
             matches: list[regex.Match] = []
             try:
                 for pos, endpos, owned in windows:
-                    matches.extend(
-                        m
-                        for m in rule.pattern.finditer(
-                            text, pos, endpos, timeout=self.regex_timeout
-                        )
-                        if m.start() < owned
-                    )
+                    for m in rule.pattern.finditer(
+                        text, pos, endpos, timeout=self.regex_timeout
+                    ):
+                        if m.start() >= owned:
+                            continue
+                        if m.end() == endpos < len(text):
+                            # Running into the window's end may have cut it
+                            # short -- a base64 blob longer than a window --
+                            # so it is matched again against the rest of the
+                            # text, from the same start.
+                            m = (
+                                rule.pattern.match(
+                                    text, m.start(), timeout=self.regex_timeout
+                                )
+                                or m
+                            )
+                        matches.append(m)
             except TimeoutError:
                 # A pathological input made this rule superlinear. Drop it for
                 # the rest of this scan rather than hang the clipboard; whatever

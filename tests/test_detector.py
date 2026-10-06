@@ -794,6 +794,20 @@ def test_a_key_across_a_window_seam_is_found_once_and_whole(
     assert [text[f.start : f.end] for f in keys] == [pem]
 
 
+def test_a_match_longer_than_a_window_is_not_cut_at_the_window_edge(
+    ruleset: RuleSet,
+) -> None:
+    rng = random.Random(9)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    blob = "".join(rng.choice(alphabet) for _ in range(100_000))
+    text = f"image: {blob}\n"
+    d = Detector(ruleset=ruleset, categories=frozenset({"high_entropy"}))
+
+    found = [f for f in d.scan(text) if f.rule_id == "safepaste-high-entropy-string"]
+
+    assert [(f.start, f.end) for f in found] == [(7, 7 + len(blob))]
+
+
 def test_scan_result_is_a_list_that_says_whether_it_is_complete(
     detector: Detector,
 ) -> None:
