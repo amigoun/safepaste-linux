@@ -447,6 +447,26 @@ def test_a_secret_found_only_in_the_markup_is_removed_from_the_plain_text_too(
     assert SECRET not in backend.writer.writes[-1]
 
 
+def test_a_partly_scanned_copy_with_a_finding_still_says_it_was_partly_checked(
+    guard_factory,
+) -> None:
+    """"1 secret removed" alone reads as the whole copy having been checked."""
+    guard, backend, events = guard_factory(mode="redact")
+    real = guard.detector
+
+    class PartlyWithFindings:
+        def scan(self, text: str):
+            return _PartialScan(real.scan(text))
+
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.detector = PartlyWithFindings()
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert len(events) == 1 and len(told) == 1
+    assert SECRET not in backend.writer.writes[-1]
+
+
 def test_a_fully_scanned_clean_copy_says_nothing(guard_factory) -> None:
     guard, _, _ = guard_factory(mode="redact")
     told: list[ClipboardEvent] = []

@@ -142,8 +142,8 @@ class Guard:
         self.timer = timer or _NoTimer()
         # Injected by whatever front end exists; a headless guard has no presenter.
         self.on_detection = on_detection
-        # Told when a copy found nothing but was not scanned in full, because
-        # saying nothing then reads as "checked and clean".
+        # Told when a copy was not scanned in full, whatever was found in it,
+        # because otherwise the silence or the count reads as "checked".
         self.on_incomplete = on_incomplete
         # Whether the front end can put a question to the user. Without one, `ask`
         # would leave the secret in place and ask nobody, so it runs as `redact`.
@@ -337,9 +337,7 @@ class Guard:
         self._last_finding_count = len(clean.findings) if clean else 0
         if clean is None:
             if incomplete:
-                log.warning("the clipboard was too large to check completely")
-                if self.on_incomplete is not None:
-                    self.on_incomplete(event)
+                self._report_incomplete(event)
             return
 
         info = summarise(clean.findings)
@@ -363,6 +361,16 @@ class Guard:
 
         if self.on_detection is not None:
             self.on_detection(clean.findings, clean.result, event)
+        # Said even after a detection: "1 secret removed" alone reads as the
+        # whole copy having been checked. Once per copy, since the monitor
+        # reports neither our own write nor a re-assert of it.
+        if incomplete:
+            self._report_incomplete(event)
+
+    def _report_incomplete(self, event: ClipboardEvent) -> None:
+        log.warning("the clipboard was too large to check completely")
+        if self.on_incomplete is not None:
+            self.on_incomplete(event)
 
     def _sanitise(self, event: ClipboardEvent) -> tuple[Sanitised | None, bool]:
         """Redact every text-bearing representation of `event`, or None if clean,

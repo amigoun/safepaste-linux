@@ -64,7 +64,8 @@ Other modes are available from Preferences: `ask` (leave the original, ask first
 so on macOS and Windows `ask` runs as `redact` and the tray does not offer it.
 
 A copy too large to check completely is never passed as clean: you get a *Clipboard
-not fully checked* notification instead, because it may still hold a secret.
+not fully checked* notification, alongside any secrets-removed notice, because the
+unchecked part may still hold a secret.
 
 ## Install
 
