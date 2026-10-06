@@ -245,13 +245,66 @@ class Allowlist:
 
     @classmethod
     def from_toml(cls, raw: dict[str, Any]) -> Allowlist:
+        """Build an Allowlist, or raise MalformedEntry saying why it cannot be.
+
+        Every field is type-checked rather than trusted, because the cheap
+        mistakes here fail open: `regexes = "abc"` iterates as three
+        one-character patterns that excuse any secret containing a, b or c.
+        """
+        if not isinstance(raw, dict):
+            raise MalformedEntry("an allowlist must be a table")
+        condition = raw.get("condition", "OR")
+        if not isinstance(condition, str) or condition.upper() not in ("OR", "AND"):
+            raise MalformedEntry(f"condition must be \"OR\" or \"AND\", not {condition!r}")
+        target = raw.get("regexTarget", "secret")
+        if target not in ("secret", "match", "line"):
+            raise MalformedEntry(
+                f"regexTarget must be secret, match or line, not {target!r}"
+            )
+        patterns = _string_list(raw, "regexes")
+        regexes = _compile_all(patterns)
+        if len(regexes) < len(patterns) and condition.upper() == "AND":
+            # Under AND a dropped criterion is one fewer thing that must hold,
+            # which would make the allowlist excuse more, not less.
+            raise MalformedEntry("an AND allowlist with an uncompilable regex")
         return cls(
-            regexes=tuple(_compile_all(raw.get("regexes") or [])),
-            stopwords=tuple(raw.get("stopwords") or []),
-            target=raw.get("regexTarget", "secret"),
-            condition=raw.get("condition", "OR"),
+            regexes=tuple(regexes),
+            stopwords=tuple(_string_list(raw, "stopwords")),
+            target=target,
+            condition=condition,
             path_scoped=bool(raw.get("paths")),
         )
+
+
+class MalformedEntry(ValueError):
+    """A rule-file entry that cannot be used as written."""
+
+
+def _string_list(raw: dict[str, Any], key: str) -> list[str]:
+    value = raw.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise MalformedEntry(f"{key} must be an array of strings")
+    return value
+
+
+def _allowlists(raw: dict[str, Any], where: str) -> list[Allowlist]:
+    """Every usable allowlist under `allowlist`/`allowlists`, skipping the rest.
+
+    Skipping is the safe direction: a dropped allowlist means more is flagged.
+    """
+    out: list[Allowlist] = []
+    for key in ("allowlist", "allowlists"):
+        block = raw.get(key)
+        if block is None:
+            continue
+        for entry in block if isinstance(block, list) else [block]:
+            try:
+                out.append(Allowlist.from_toml(entry))
+            except MalformedEntry as exc:
+                log.warning("%s: skipping an allowlist: %s", where, exc)
+    return out
 
 
 @dataclass(frozen=True)
@@ -322,18 +375,52 @@ def _compile_all(patterns: list[str]) -> list[regex.Pattern]:
     return out
 
 
-def _parse_rule(raw: dict[str, Any]) -> Rule | None:
-    """Build a Rule, or return None with the reason logged."""
-    rid = raw.get("id")
-    if not rid:
-        log.warning("rule with no id, skipping")
-        return None
+def _parse_rule(raw: dict[str, Any], where: str) -> Rule | None:
+    """Build a Rule, or None for a rule with no regex to run.
 
+    Raises MalformedEntry for a rule that cannot be used as written, and
+    UncompilableRule for one whose regex this `regex` cannot compile.
+    """
+    rid = raw["id"]
     pattern_src = raw.get("regex")
     if not pattern_src:
         # Path-only rules (e.g. pkcs12-file) cannot apply to a clipboard: there
         # is no filename to match. Dropping them is correct, not a limitation.
         return None
+    if not isinstance(pattern_src, str):
+        raise MalformedEntry("regex must be a string")
+
+    description = raw.get("description", rid)
+    if not isinstance(description, str):
+        raise MalformedEntry("description must be a string")
+    keywords = _string_list(raw, "keywords")
+    entropy = raw.get("entropy")
+    # bool is an int to Python, and `entropy = true` is a typo, not a threshold.
+    if entropy is not None and (
+        isinstance(entropy, bool) or not isinstance(entropy, int | float)
+    ):
+        raise MalformedEntry("entropy must be a number")
+    secret_group = raw.get("secretGroup")
+    if secret_group is not None and (
+        isinstance(secret_group, bool)
+        or not isinstance(secret_group, int)
+        or secret_group < 0
+    ):
+        raise MalformedEntry("secretGroup must be a non-negative integer")
+    # A string here is truthy whatever it says, so `enabled = "false"` would
+    # quietly leave the rule on: refuse it rather than guess.
+    for switch in ("enabled", "default_off"):
+        if not isinstance(raw.get(switch, False), bool):
+            raise MalformedEntry(f"{switch} must be true or false")
+    category = raw.get("category")
+    if category is not None and category not in CATEGORIES:
+        log.warning(
+            "%s: rule %s has unknown category %r; classifying it instead",
+            where,
+            rid,
+            category,
+        )
+        category = None
 
     try:
         pattern = regex.compile(translate_re2(pattern_src))
@@ -341,29 +428,28 @@ def _parse_rule(raw: dict[str, Any]) -> Rule | None:
         # Recorded as a compile failure by the caller, not merely logged: a rule
         # that silently vanishes is a detector the user thinks they have.
         log.error("rule %s has an uncompilable regex, skipping: %s", rid, exc)
-        return None
+        raise UncompilableRule(str(exc)) from exc
+    if secret_group is not None and secret_group > pattern.groups:
+        raise MalformedEntry(
+            f"secretGroup {secret_group} but the regex has {pattern.groups} group(s)"
+        )
 
-    allowlists: list[Allowlist] = []
-    for key in ("allowlist", "allowlists"):
-        block = raw.get(key)
-        if isinstance(block, dict):
-            allowlists.append(Allowlist.from_toml(block))
-        elif isinstance(block, list):
-            allowlists.extend(Allowlist.from_toml(b) for b in block)
-
-    description = raw.get("description", rid)
     return Rule(
         id=rid,
         description=description,
         pattern=pattern,
-        keywords=tuple(k.lower() for k in (raw.get("keywords") or [])),
-        category=raw.get("category") or classify(rid, description),
-        entropy=raw.get("entropy"),
-        secret_group=raw.get("secretGroup"),
-        allowlists=tuple(allowlists),
+        keywords=tuple(k.lower() for k in keywords),
+        category=category or classify(rid, description),
+        entropy=entropy,
+        secret_group=secret_group,
+        allowlists=tuple(_allowlists(raw, f"{where}: rule {rid}")),
         enabled=raw.get("enabled", True),
         default_off=raw.get("default_off", False),
     )
+
+
+class UncompilableRule(Exception):
+    """A rule whose regex the installed `regex` module rejects."""
 
 
 def load_file(path: pathlib.Path, into: RuleSet) -> None:
@@ -373,23 +459,33 @@ def load_file(path: pathlib.Path, into: RuleSet) -> None:
         log.error("cannot load rules from %s: %s", path, exc)
         return
 
-    for key in ("allowlist", "allowlists"):
-        block = doc.get(key)
-        if isinstance(block, dict):
-            into.global_allowlists.append(Allowlist.from_toml(block))
-        elif isinstance(block, list):
-            into.global_allowlists.extend(Allowlist.from_toml(b) for b in block)
+    into.global_allowlists.extend(_allowlists(doc, str(path)))
+
+    entries = doc.get("rules") or []
+    if not isinstance(entries, list):
+        log.warning(
+            "%s: `rules` must be an array of tables, written [[rules]]; "
+            "no rules loaded from it",
+            path,
+        )
+        return
 
     seen = {r.id for r in into.rules}
-    for raw in doc.get("rules") or []:
-        rule = _parse_rule(raw)
+    for raw in entries:
+        rid = raw.get("id") if isinstance(raw, dict) else None
+        if not rid or not isinstance(rid, str):
+            log.warning("%s: skipping a rule with no usable id", path)
+            continue
+        try:
+            rule = _parse_rule(raw, str(path))
+        except UncompilableRule:
+            into.compile_failures.append((rid, "regex did not compile"))
+            continue
+        except MalformedEntry as exc:
+            log.warning("%s: skipping rule %s: %s", path, rid, exc)
+            continue
         if rule is None:
-            rid = raw.get("id")
-            if rid:
-                if raw.get("regex"):
-                    into.compile_failures.append((rid, "regex did not compile"))
-                else:
-                    into.skipped.append((rid, "no usable regex"))
+            into.skipped.append((rid, "no usable regex"))
             continue
         if rule.id in seen:
             # Later files win, so a user file can retune a vendored rule by id.
