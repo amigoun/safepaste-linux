@@ -201,10 +201,12 @@ category = "passwords"
 # The name starts a line, or follows `{`, `,` or `(` -- a JSON object or a call's
 # keyword arguments -- and may be quoted. A quoted value runs to its closing
 # quote, spaces, `#` and `$` included, and whatever follows it on the line is
-# not the value's business. An unquoted one must run to the end of the line,
-# less a trailing `,` or `;` and a ` # comment`: `#` with no space before it is
-# part of the password, not a comment.
-regex = '''(?im)(?:^[ \t]*(?:export[ \t]+|-[ \t]+)?|[{,(][ \t]*)(["']?)[\w.\-]{0,40}(?:password|passwd|pwd|secret)\1[ \t]*(?::?=|:)[ \t]*(?|"([^"\r\n]{6,128})"|'([^'\r\n]{6,128})'|([^\s"'][^\s"']{5,127}?)[,;]?(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$)'''
+# not the value's business. An unquoted value counts only where the name starts
+# the line (env, YAML, ini): after `{`, `,` or `(` it is code passing a variable
+# or a number along, not a literal. It must run to the end of the line, less a
+# trailing `,` or `;` and a ` # comment`: `#` with no space before it is part of
+# the password, not a comment.
+regex = '''(?im)(?|^[ \t]*(?:export[ \t]+|-[ \t]+)?(["']?)[\w.\-]{0,40}(?:password|passwd|pwd|secret)\1[ \t]*(?::?=|:)[ \t]*(?|"([^"\r\n]{6,128})"|'([^'\r\n]{6,128})'|([^\s"'][^\s"']{5,127}?)[,;]?(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$)|[{,(][ \t]*(["']?)[\w.\-]{0,40}(?:password|passwd|pwd|secret)\1[ \t]*(?::?=|:)[ \t]*(?|"([^"\r\n]{6,128})"|'([^'\r\n]{6,128})'))'''
 secretGroup = 2
 keywords = ["password", "passwd", "pwd", "secret"]
 entropy = 1.8

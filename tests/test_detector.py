@@ -241,6 +241,21 @@ def test_a_reference_or_placeholder_password_is_not_flagged(
     assert detector.scan(text) == []
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "client.login(username=username, password=password)",
+        "connect(host, password=cfg.db_password)",
+        "connect(host, secret=False)",
+        '{"password": 123456789},',
+    ],
+)
+def test_code_that_passes_a_password_along_is_not_flagged(
+    detector: Detector, text: str
+) -> None:
+    assert detector.scan(text) == []
+
+
 # ---------------------------------------------------------------------------
 # Placeholders are whole words, not prefixes
 # ---------------------------------------------------------------------------
