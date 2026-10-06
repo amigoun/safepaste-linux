@@ -254,6 +254,90 @@ def test_a_uuid_or_short_sha_under_a_generic_name_is_still_not_flagged(
 
 
 # ---------------------------------------------------------------------------
+# Kubernetes Secret manifests: every value, not the first
+# ---------------------------------------------------------------------------
+
+_SECRET_VALUES = [
+    "c3ZjX2FwcF9wcm9k",
+    "cG9zdGdyZXM6Ly9zdmM6WnE4dlIya0xtTjRwVDd3QGRiOjU0MzIvcHJvZA==",
+    "c2tfbGl2ZV81MUhxOHZSMmtMbU40cFQ3d1hiWTljRTFmRzNoSjVrUTBy",
+]
+_SECRET_DATA = (
+    "data:\n"
+    f"  username: {_SECRET_VALUES[0]}\n"
+    f"  DATABASE_URL: {_SECRET_VALUES[1]}\n"
+    f"  stripe: {_SECRET_VALUES[2]}\n"
+)
+
+
+def _k8s_values(detector: Detector, text: str) -> list[str]:
+    return [
+        text[f.start : f.end]
+        for f in detector.scan(text)
+        if f.rule_id == "kubernetes-secret-yaml"
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: app-creds\n"
+        "type: Opaque\n" + _SECRET_DATA,
+        # `kubectl get -o yaml` sorts keys, which puts data above kind.
+        "apiVersion: v1\n" + _SECRET_DATA + "kind: Secret\nmetadata:\n"
+        "  name: app-creds\ntype: Opaque\n",
+    ],
+    ids=["kind-first", "kubectl-order"],
+)
+def test_every_value_of_a_secret_manifest_is_found(
+    detector: Detector, text: str
+) -> None:
+    assert _k8s_values(detector, text) == _SECRET_VALUES
+
+
+def test_string_data_values_are_found_and_templates_are_not(
+    detector: Detector,
+) -> None:
+    text = (
+        "kind: Secret\n"
+        "stringData:\n"
+        '  password: "Zq8v!R2k$LmN4pT7w"  # rotated monthly\n'
+        "  template: {{ .Values.password | b64enc }}\n"
+        "  empty: \"\"\n"
+        "  last: Zq8vR2kLmN4pT7wX\n"
+    )
+    assert _k8s_values(detector, text) == ["Zq8v!R2k$LmN4pT7w", "Zq8vR2kLmN4pT7wX"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "kind: ConfigMap\n" + _SECRET_DATA,
+        "kind: Secret\nmetadata:\n  name: a\n---\nkind: ConfigMap\n" + _SECRET_DATA,
+        "kind: SecretProviderClass\n" + _SECRET_DATA,
+    ],
+    ids=["configmap", "secret-in-another-document", "lookalike-kind"],
+)
+def test_data_outside_a_secret_is_not_flagged(detector: Detector, text: str) -> None:
+    assert _k8s_values(detector, text) == []
+
+
+def test_every_capture_of_a_repeated_secret_group_is_a_finding() -> None:
+    rule = Rule(
+        id="test-list",
+        description="a list of values",
+        pattern=regex.compile(r"keys:(?:\s+([A-Za-z0-9]{8,}))+"),
+        keywords=(),
+        category="api_keys",
+    )
+    text = "keys: Zq8vR2kL N4pT7wXb Y9cE1fG3"
+
+    found = Detector(ruleset=RuleSet(rules=[rule])).scan(text)
+
+    assert [text[f.start : f.end] for f in found] == ["Zq8vR2kL", "N4pT7wXb", "Y9cE1fG3"]
+
+
+# ---------------------------------------------------------------------------
 # Passwords inside URLs
 # ---------------------------------------------------------------------------
 

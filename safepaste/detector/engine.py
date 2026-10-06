@@ -214,13 +214,18 @@ class Detector:
         """
         return self._suppress_placeholder and self.placeholder in secret
 
-    def _secret_span(self, m: regex.Match, rule: Rule) -> tuple[int, int] | None:
-        """Which slice of the match is the secret itself.
+    def _secret_spans(self, m: regex.Match, rule: Rule) -> list[tuple[int, int]]:
+        """Which slices of the match are the secret itself.
 
         Mirrors Gitleaks: an explicit `secretGroup` wins; otherwise, if the
         pattern has any capture group, group 1 *is* the secret. That convention
         is why `AWS_SECRET_ACCESS_KEY=wJal…` can be redacted to
         `AWS_SECRET_ACCESS_KEY=[REDACTED]` rather than losing the whole line.
+
+        Unlike Gitleaks, a group inside a repetition yields every capture rather
+        than only the last. That is what lets one match cover a whole block of
+        values -- every entry under a Kubernetes Secret's `data:` -- where Go's
+        engine can only ever report one of them.
         """
         # `or` would be wrong here: a rule that explicitly sets `secretGroup = 0`
         # (meaning "the secret is the whole match") is falsy, and `0 or fallback`
@@ -231,12 +236,12 @@ class Detector:
             else (1 if m.re.groups >= 1 else 0)
         )
         try:
-            span = m.span(group)
+            spans = m.spans(group)
         except (IndexError, regex.error):  # pragma: no cover - defensive
-            return None
-        if span == (-1, -1):  # group declared but did not participate
-            span = m.span(0)
-        return span if span[1] > span[0] else None
+            return []
+        if not spans:  # group declared but did not participate
+            spans = [m.span(0)]
+        return [span for span in spans if span[1] > span[0]]
 
     def _is_excluded(self, secret: str) -> bool:
         """Whether the user has said to stop flagging this exact value.
@@ -298,46 +303,47 @@ class Detector:
                 continue
 
             for m in matches:
-                span = self._secret_span(m, rule)
-                if span is None:
-                    continue
-                # A match near a window edge can be found again, cut short, by
-                # the next window; the secret span is what identifies it.
-                key = (rule.id, span[0], span[1])
-                if key in seen:
-                    continue
-                secret = text[span[0] : span[1]]
-                # Our own output is not a finding. Checked against the secret
-                # span rather than the whole match on purpose: a placeholder
-                # elsewhere on the line must not excuse a real secret beside it.
-                if self._is_already_redacted(secret):
-                    continue
-                if not entropy_mod.passes(secret, rule.entropy):
-                    continue
-                if self._is_excluded(secret):
-                    continue
-                line = _line_containing(text, span[0])
-                whole = m.group(0)
-                if any(a.excludes(secret, whole, line) for a in rule.allowlists):
-                    continue
-                if any(
-                    a.applies_to(rule.id) and a.excludes(secret, whole, line)
-                    for a in self.ruleset.global_allowlists
-                ):
-                    continue
-                seen.add(key)
-                findings.append(
-                    Finding(
-                        rule_id=rule.id,
-                        label=rule.label,
-                        category=rule.category,
-                        start=span[0],
-                        end=span[1],
-                        match_start=m.start(),
-                        match_end=m.end(),
-                        entropy=entropy_mod.shannon(secret) if rule.entropy else None,
+                for span in self._secret_spans(m, rule):
+                    # A match near a window edge can be found again, cut short,
+                    # by the next window; the secret span is what identifies it.
+                    key = (rule.id, span[0], span[1])
+                    if key in seen:
+                        continue
+                    secret = text[span[0] : span[1]]
+                    # Our own output is not a finding. Checked against the
+                    # secret span rather than the whole match on purpose: a
+                    # placeholder elsewhere on the line must not excuse a real
+                    # secret beside it.
+                    if self._is_already_redacted(secret):
+                        continue
+                    if not entropy_mod.passes(secret, rule.entropy):
+                        continue
+                    if self._is_excluded(secret):
+                        continue
+                    line = _line_containing(text, span[0])
+                    whole = m.group(0)
+                    if any(a.excludes(secret, whole, line) for a in rule.allowlists):
+                        continue
+                    if any(
+                        a.applies_to(rule.id) and a.excludes(secret, whole, line)
+                        for a in self.ruleset.global_allowlists
+                    ):
+                        continue
+                    seen.add(key)
+                    findings.append(
+                        Finding(
+                            rule_id=rule.id,
+                            label=rule.label,
+                            category=rule.category,
+                            start=span[0],
+                            end=span[1],
+                            match_start=m.start(),
+                            match_end=m.end(),
+                            entropy=(
+                                entropy_mod.shannon(secret) if rule.entropy else None
+                            ),
+                        )
                     )
-                )
 
         elapsed = time.monotonic() - started
         if timed_out:

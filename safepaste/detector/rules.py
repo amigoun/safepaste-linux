@@ -263,7 +263,7 @@ class Allowlist:
             raise MalformedEntry("an allowlist must be a table")
         condition = raw.get("condition", "OR")
         if not isinstance(condition, str) or condition.upper() not in ("OR", "AND"):
-            raise MalformedEntry(f"condition must be \"OR\" or \"AND\", not {condition!r}")
+            raise MalformedEntry(f"condition must be OR or AND, not {condition!r}")
         target = raw.get("regexTarget", "secret")
         if target not in ("secret", "match", "line"):
             raise MalformedEntry(

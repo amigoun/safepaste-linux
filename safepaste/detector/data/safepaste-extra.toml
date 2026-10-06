@@ -139,9 +139,25 @@ keywords = ["session_token"]
 entropy = 4.0
 
 # --------------------------------------------------------------------------
-# Kubernetes credentials. kubernetes-secret-yaml upstream targets Secret
-# manifests; a kubeconfig is a different shape and is what people actually paste.
+# Kubernetes credentials: Secret manifests, and kubeconfig files, which are a
+# different shape and what people paste most.
+#
+# This replaces upstream's kubernetes-secret-yaml, which captures one value per
+# match and so redacted only the first entry of a Secret, leaving the rest in
+# the clear. One match here is a whole `data:` or `stringData:` block, and every
+# value in it is a capture of group 2 (the engine reports each one). The block
+# counts only if `kind: Secret` sits in the same YAML document, above it or --
+# as `kubectl get -o yaml` orders keys -- below it, within 200 lines either way.
+# Values that are templates, block scalars or empty are left alone, and a block
+# with no plain value in it does not match at all.
 # --------------------------------------------------------------------------
+[[rules]]
+id = "kubernetes-secret-yaml"
+description = "Kubernetes Secret data"
+regex = '''(?im)^([ \t]*)(?:data|stringData):[ \t]*(?:#[^\r\n]*)?(?:(?<=^[ \t]*(?:-[ \t]+)?kind:[ \t]*["']?secret\b(?!-)[^\r\n]*(?:\r?\n(?!---)[^\r\n]*){0,200})|(?=(?:\r?\n(?!---)[^\r\n]*){0,200}?\r?\n[ \t]*(?:-[ \t]+)?kind:[ \t]*["']?secret\b(?!-)))(?:\r?\n\1[ \t]+[\w.-]+:[ \t]*["']?([^\s"'#|>{][^\s"'#]{3,})["']?[ \t]*(?:#[^\r\n]*)?(?=\r?\n|$)|\r?\n\1[ \t]+[^\r\n]*|\r?\n[ \t]*(?:#[^\r\n]*)?(?=\r?\n|$))++(?(2)|(?!))'''
+secretGroup = 2
+keywords = ["secret"]
+
 [[rules]]
 id = "safepaste-kubeconfig-client-key"
 description = "kubeconfig client key data"
