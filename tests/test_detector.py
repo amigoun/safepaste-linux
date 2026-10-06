@@ -188,6 +188,60 @@ def test_false_positive_corpus_yields_no_findings(detector: Detector, text: str)
 
 
 # ---------------------------------------------------------------------------
+# Password assignments in the shapes they are actually written
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "password"),
+    [
+        ("DB_PASSWORD=Zq8v#R2kLmN4pT7w", "Zq8v#R2kLmN4pT7w"),
+        ("db_password: 'Zq8v#R2kLmN4pT7w'", "Zq8v#R2kLmN4pT7w"),
+        ('{"username": "svc", "password": "Zq8v!R2k$LmN4pT7w"}', "Zq8v!R2k$LmN4pT7w"),
+        ('  "Password": "Zq8v!R2k$LmN4pT7w",', "Zq8v!R2k$LmN4pT7w"),
+        (
+            'export DB_PASSWORD="correct horse battery staple"',
+            "correct horse battery staple",
+        ),
+        ("DB_PASSWORD=Kx92mQzR7v  # rotated monthly", "Kx92mQzR7v"),
+        ('connect(user="svc", password="Zq8v!R2k$LmN4pT7w")', "Zq8v!R2k$LmN4pT7w"),
+    ],
+    ids=["hash-unquoted", "hash-single-quoted", "json-inline", "json-indented",
+         "spaces-quoted", "trailing-comment", "keyword-argument"],
+)
+def test_a_password_assignment_is_found_whole(
+    detector: Detector, text: str, password: str
+) -> None:
+    found = [
+        text[f.start : f.end]
+        for f in detector.scan(text)
+        if f.rule_id == "safepaste-env-password-assignment"
+    ]
+    assert found == [password]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password: ${DB_PASSWORD}",
+        'password: "${DB_PASSWORD}"',
+        "password: ${DB_PASSWORD:-postgres}",
+        'DB_PASSWORD="$(cat /run/secrets/db)"',
+        'password = os.environ["DB_PASSWORD"]',
+        'password: "{{ .Values.db.password }}"',
+        '"password": "string"',
+        "password: <your-password>",
+        "password_reset_url=/account/reset",
+        "Your password: must be 8+ characters",
+    ],
+)
+def test_a_reference_or_placeholder_password_is_not_flagged(
+    detector: Detector, text: str
+) -> None:
+    assert detector.scan(text) == []
+
+
+# ---------------------------------------------------------------------------
 # Placeholders are whole words, not prefixes
 # ---------------------------------------------------------------------------
 

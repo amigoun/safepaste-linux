@@ -194,7 +194,15 @@ category = "passwords"
 # so `password_reset_url=/foo` and `has_password=true` do not qualify. Entropy is
 # set low on purpose: a weak password is still a password, and unlike an API key
 # there is no length or charset floor to lean on.
-regex = '''(?im)^\s*(?:export\s+)?[\w.\-]{0,40}(?:password|passwd|pwd|secret)\s*[:=]\s*["']?([^\s"'#]{6,128})["']?\s*$'''
+#
+# The name starts a line, or follows `{`, `,` or `(` -- a JSON object or a call's
+# keyword arguments -- and may be quoted. A quoted value runs to its closing
+# quote, spaces, `#` and `$` included, and whatever follows it on the line is
+# not the value's business. An unquoted one must run to the end of the line,
+# less a trailing `,` or `;` and a ` # comment`: `#` with no space before it is
+# part of the password, not a comment.
+regex = '''(?im)(?:^[ \t]*(?:export[ \t]+|-[ \t]+)?|[{,(][ \t]*)(["']?)[\w.\-]{0,40}(?:password|passwd|pwd|secret)\1[ \t]*(?::?=|:)[ \t]*(?|"([^"\r\n]{6,128})"|'([^'\r\n]{6,128})'|([^\s"'][^\s"']{5,127}?)[,;]?(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$)'''
+secretGroup = 2
 keywords = ["password", "passwd", "pwd", "secret"]
 entropy = 1.8
   [[rules.allowlists]]
@@ -202,7 +210,12 @@ entropy = 1.8
       '''(?i)^(?:true|false|null|nil|none|undefined|yes|no|on|off|\d{1,4})$''',
       # Values that are themselves a lookup, not a literal.
       '''^[$%]\{?[\w.]+\}?$''',
+      '''^\$\{[^}\s]+\}$''',
+      '''^\$\([^)]*\)$''',
+      '''^<%.*%>$''',
       '''(?i)^(?:required|optional|unset|empty|todo|tbd|n/?a)$''',
+      # Schema and documentation examples name the type, not a value.
+      '''(?i)^(?:string|password|secret|text|value)$''',
   ]
 
 # --------------------------------------------------------------------------
