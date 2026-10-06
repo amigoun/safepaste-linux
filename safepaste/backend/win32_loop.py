@@ -105,8 +105,9 @@ def parse_accelerator(accel: str) -> tuple[int, int] | None:
         vk = ord(key.upper())
     else:
         return None
-    if mods == 0:
-        # A bare key would grab it system-wide from every application.
+    if not mods & (MOD_CONTROL | MOD_ALT | MOD_WIN):
+        # A bare key would grab it system-wide from every application, and Shift
+        # alone is only a capital letter: <Shift>v would swallow every V.
         return None
     return mods | MOD_NOREPEAT, vk
 

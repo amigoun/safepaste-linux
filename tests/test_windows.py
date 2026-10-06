@@ -529,6 +529,8 @@ def test_accelerator_parsing_rejects_what_it_cannot_honour() -> None:
 
     # A bare key would be grabbed from every application on the system.
     assert parse_accelerator("v") is None
+    # Shift alone is only a capital letter: this would swallow every V typed.
+    assert parse_accelerator("<Shift>v") is None
     assert parse_accelerator("") is None
     assert parse_accelerator("<Control>") is None
     assert parse_accelerator("<Nonsense>v") is None

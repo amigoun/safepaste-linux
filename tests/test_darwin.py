@@ -857,7 +857,7 @@ def test_accelerator_translates_to_carbon_modifiers() -> None:
     # character, unlike Windows where the virtual-key code *is* the ASCII value.
     assert key == 0x09
 
-    assert parse_accelerator("<Shift>a")[0] & CARBON_SHIFT
+    assert parse_accelerator("<Shift><Control>a")[0] & CARBON_SHIFT
     assert parse_accelerator("<Command>v")[0] & CARBON_CMD
 
 
@@ -878,6 +878,7 @@ def test_accelerator_rejects_what_it_cannot_bind() -> None:
     from safepaste.backend.darwin_loop import parse_accelerator
 
     assert parse_accelerator("v") is None  # bare key: would grab it everywhere
+    assert parse_accelerator("<Shift>v") is None  # every capital V, everywhere
     assert parse_accelerator("") is None
     assert parse_accelerator("<Control>") is None
     assert parse_accelerator("<Nonsense>v") is None

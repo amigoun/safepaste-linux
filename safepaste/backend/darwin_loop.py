@@ -86,8 +86,10 @@ def parse_accelerator(accel: str) -> tuple[int, int] | None:
         mods |= _MODIFIERS[token]
         lowered = lowered[end + 1 :]
     key = lowered.strip()
-    if not key or key not in _VK or mods == 0:
-        # A bare key would be taken from every application on the system.
+    chord = CARBON_CMD | CARBON_CONTROL | CARBON_OPTION
+    if not key or key not in _VK or not mods & chord:
+        # A bare key would be taken from every application on the system, and
+        # Shift alone is only a capital letter: <Shift>v would swallow every V.
         return None
     return mods, _VK[key]
 
