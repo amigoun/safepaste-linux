@@ -365,11 +365,21 @@ class RuleSet:
         ]
 
 
+# Upstream allowlist patterns that do not say what they plainly mean, corrected
+# as they load: editing the vendored file would break its provenance digest, and
+# the fix would be lost on the next fetch. `^true|false|null$` alternates over
+# its anchors, so it excused any secret merely containing "false", starting
+# with "true" or ending in "null".
+_UPSTREAM_CORRECTIONS = {
+    r"(?i)^true|false|null$": r"(?i)^(?:true|false|null)$",
+}
+
+
 def _compile_all(patterns: list[str]) -> list[regex.Pattern]:
     out = []
     for p in patterns:
         try:
-            out.append(regex.compile(translate_re2(p)))
+            out.append(regex.compile(translate_re2(_UPSTREAM_CORRECTIONS.get(p, p))))
         except regex.error as exc:
             log.warning("skipping uncompilable allowlist pattern: %s", exc)
     return out

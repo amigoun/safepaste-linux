@@ -405,3 +405,38 @@ def test_an_and_allowlist_with_an_uncompilable_regex_is_dropped() -> None:
         Allowlist.from_toml(
             {"condition": "AND", "stopwords": ["ghp"], "regexes": ["(unclosed"]}
         )
+
+
+# ---------------------------------------------------------------------------
+# Upstream's global `(?i)^true|false|null$` binds as `^true` | `false` |
+# `null$`, so it allowed any secret that merely contained "false".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "Zq8vR2kLfalseN4pT7wXbY9cE1fG3",
+        "trueZq8vR2kLN4pT7wXbY9cE1fG3",
+        "Zq8vR2kLN4pT7wXbY9cE1fG3null",
+    ],
+)
+def test_a_secret_containing_a_boolean_word_is_still_found(
+    secret: str, ruleset: RuleSet
+) -> None:
+    text = f"API_KEY={secret}"
+    found = Detector(ruleset=ruleset).scan(text)
+    assert secret in [text[f.start : f.end] for f in found]
+
+
+@pytest.mark.parametrize("value", ["true", "FALSE", "null"])
+def test_a_bare_boolean_is_still_allowed(value: str, ruleset: RuleSet) -> None:
+    assert any(a.excludes(value, value, value) for a in ruleset.global_allowlists)
+
+
+def test_the_vendored_file_still_carries_the_pattern_being_corrected() -> None:
+    """If upstream fixes it, the correction is dead weight and can go."""
+    from safepaste.detector.rules import GITLEAKS_TOML
+
+    vendored = GITLEAKS_TOML.read_text(encoding="utf-8")
+    assert "(?i)^true|false|null$" in vendored
