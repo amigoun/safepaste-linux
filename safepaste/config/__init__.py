@@ -18,6 +18,7 @@ import logging
 import os
 import pathlib
 import secrets
+import stat
 import sys
 import tempfile
 import tomllib
@@ -474,21 +475,24 @@ def exclusion_key_path(config_path: pathlib.Path | None = None) -> pathlib.Path:
 def load_exclusion_key(config_path: pathlib.Path | None = None) -> bytes | None:
     """The machine-local exclusion key, or None if there is not one yet.
 
-    Never creates anything -- a read is a read. Every failure here returns None,
-    which fails in the safe direction: exclusions stop matching, so values get
-    flagged again rather than being waved through on a digest nothing can verify.
+    Never creates anything -- a read is a read -- though it does take back
+    permissions that were loosened on the key or its directory. Every failure
+    here returns None, which fails in the safe direction: exclusions stop
+    matching, so values get flagged again rather than being waved through on a
+    digest nothing can verify.
     """
     path = exclusion_key_path(config_path)
     try:
-        raw = path.read_text(encoding="utf-8").strip()
+        raw = path.read_bytes()
     except FileNotFoundError:
         return None
     except OSError as exc:
         log.error("cannot read the exclusion key at %s (%s)", path, exc)
         return None
+    _restrict_to_owner(path)
     try:
-        key = bytes.fromhex(raw)
-    except ValueError:
+        key = bytes.fromhex(raw.decode("ascii").strip())
+    except ValueError:  # UnicodeDecodeError included
         log.error("the exclusion key at %s is not hex; exclusions cannot match", path)
         return None
     if len(key) < EXCLUSION_KEY_BYTES:
@@ -502,6 +506,30 @@ def load_exclusion_key(config_path: pathlib.Path | None = None) -> bytes | None:
     return key
 
 
+def _restrict_to_owner(path: pathlib.Path) -> None:
+    """Put the key back to 0600 and its directory to 0700 if either was widened.
+
+    Checked on every read, not only at creation, because a key restored from a
+    backup or copied from another machine arrives with whatever mode the copy
+    gave it. Windows has no such modes to check.
+    """
+    if sys.platform == "win32":
+        return
+    for target, mode in ((path, 0o600), (path.parent, 0o700)):
+        try:
+            if stat.S_IMODE(target.stat().st_mode) & 0o077:
+                os.chmod(target, mode)
+                log.warning(
+                    "%s was open to other users; restricted it to %o", target, mode
+                )
+        except OSError as exc:
+            log.warning("cannot restrict %s to its owner (%s)", target, exc)
+
+
+class ExclusionKeyError(OSError):
+    """There is a key file, and it cannot be used or replaced."""
+
+
 def ensure_exclusion_key(config_path: pathlib.Path | None = None) -> bytes:
     """The machine-local exclusion key, minting one on first use.
 
@@ -512,6 +540,9 @@ def ensure_exclusion_key(config_path: pathlib.Path | None = None) -> bytes:
     would let the loser overwrite it instead, silently invalidating every
     exclusion the winner had just written. It also means no reader ever sees a
     half-written key.
+
+    Raises OSError when no usable key can be kept on disk, ExclusionKeyError
+    when that is because an unusable one is already there.
     """
     existing = load_exclusion_key(config_path)
     if existing is not None:
@@ -544,11 +575,15 @@ def ensure_exclusion_key(config_path: pathlib.Path | None = None) -> bytes:
         tmp.unlink()
 
     won = load_exclusion_key(config_path)
-    if won is None:  # pragma: no cover - the directory went away under us
-        log.error(
-            "could not persist an exclusion key at %s; exclusions will not stick", path
+    if won is None:
+        # Raised rather than handing back the key just minted: nothing on disk
+        # holds it, so every digest made with it would match only until exit.
+        # The unusable file is left alone; replacing it is the user's call.
+        raise ExclusionKeyError(
+            f"the exclusion key at {path} is unusable; move it aside and a new "
+            "one will be created (exclusions made with the old one will need "
+            "adding again)"
         )
-        return key
     if won != key:
         log.info("another process created the exclusion key first; using that one")
     else:

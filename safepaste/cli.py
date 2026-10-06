@@ -390,7 +390,13 @@ def cmd_hash(args: argparse.Namespace) -> int:
     log.debug("hashing %d char(s) read from stdin", len(text))
     # Mints the key if this is the first thing on the machine to need one, so
     # that a hand-written exclusion and one added from the dialog agree.
-    print(value_hash(text, config_mod.ensure_exclusion_key()))
+    try:
+        key = config_mod.ensure_exclusion_key()
+    except OSError as exc:
+        # No digest at all beats one under a key nothing else will ever read.
+        print(f"safepaste: cannot keep an exclusion key: {exc}", file=sys.stderr)
+        return 2
+    print(value_hash(text, key))
     return 0
 
 

@@ -9,7 +9,9 @@ not contain, and everything below is about that split staying true.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import io
 import logging
 import stat
 import sys
@@ -185,6 +187,56 @@ def test_an_unusable_key_reads_as_absent(tmp_path, content: str, caplog) -> None
     (tmp_path / config_mod.EXCLUSION_KEY_NAME).write_text(content)
     with caplog.at_level(logging.ERROR):
         assert config_mod.load_exclusion_key(cfg) is None
+
+
+def test_a_key_that_is_not_text_reads_as_absent(tmp_path, caplog) -> None:
+    """Raised past the OSError handler, this took the daemon down at startup."""
+    cfg = tmp_path / "config.toml"
+    key_file = tmp_path / config_mod.EXCLUSION_KEY_NAME
+    key_file.write_bytes(b"\xff\xfe" + bytes(range(64)))
+    with caplog.at_level(logging.ERROR):
+        assert config_mod.load_exclusion_key(cfg) is None
+    assert any("not hex" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unusable_key_is_neither_replaced_nor_papered_over(tmp_path) -> None:
+    """Minting a key that is never written would yield digests that match
+    nothing after this process exits; overwriting the file is not ours to do."""
+    cfg = tmp_path / "config.toml"
+    key_file = tmp_path / config_mod.EXCLUSION_KEY_NAME
+    key_file.write_bytes(b"\xff\xfe corrupt")
+    with pytest.raises(config_mod.ExclusionKeyError, match="move it aside"):
+        config_mod.ensure_exclusion_key(cfg)
+    assert key_file.read_bytes() == b"\xff\xfe corrupt"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [config_mod.EXCLUSION_KEY_NAME]
+
+
+def test_hash_refuses_to_print_a_digest_it_cannot_keep(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from safepaste import cli
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    (tmp_path / config_mod.EXCLUSION_KEY_NAME).write_text("not hex at all")
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"hunter2\n")))
+
+    assert cli.cmd_hash(argparse.Namespace()) == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "exclusion key" in err and "hunter2" not in err
+
+
+@posix_only
+def test_a_loosened_key_is_restricted_again_when_read(tmp_path) -> None:
+    cfg = tmp_path / "keys" / "config.toml"
+    key = config_mod.ensure_exclusion_key(cfg)
+    key_file = tmp_path / "keys" / config_mod.EXCLUSION_KEY_NAME
+    key_file.chmod(0o644)
+    key_file.parent.chmod(0o755)
+
+    assert config_mod.load_exclusion_key(cfg) == key
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+    assert stat.S_IMODE(key_file.parent.stat().st_mode) == 0o700
 
 
 # ---------------------------------------------------------------------------
