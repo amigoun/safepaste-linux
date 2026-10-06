@@ -246,7 +246,7 @@ def test_the_cli_hardens_itself(monkeypatch, capsys, _restore_package_logger) ->
     monkeypatch.setattr(
         cli.hardening, "harden", lambda **kw: calls.append(kw) or Hardening()
     )
-    cli.main(["rules", "--stats"])
+    cli.main(["rules", "--stats", "--no-config"])
     capsys.readouterr()
 
     assert calls == [{"lock_memory": False}], "the CLI must not lock its address space"

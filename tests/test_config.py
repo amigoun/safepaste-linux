@@ -173,9 +173,8 @@ regex = '''acme_[a-z0-9]{24}'''
 def test_an_absolute_rule_glob_is_honoured(config_dir, tmp_path_factory) -> None:
     elsewhere = tmp_path_factory.mktemp("shared-rules")
     (elsewhere / "acme.toml").write_text(RULE_FILE)
-    cfg = _load(
-        config_dir, f'[detection]\nextra_rule_globs = ["{elsewhere.as_posix()}/*.toml"]\n'
-    )
+    pattern = f"{elsewhere.as_posix()}/*.toml"
+    cfg = _load(config_dir, f'[detection]\nextra_rule_globs = ["{pattern}"]\n')
     assert cfg.extra_rule_paths() == [elsewhere / "acme.toml"]
 
 
