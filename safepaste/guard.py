@@ -32,6 +32,12 @@ from .redactor import Redaction, RedactionStyle, redact
 
 log = logging.getLogger(__name__)
 
+# What a copy-time detection did to the clipboard, so a front end words its
+# notice from what happened rather than from the mode that was meant to happen.
+REMOVED = "removed"
+NOT_REMOVED = "not-removed"  # a redaction was due and the write failed
+LEFT = "left"  # the mode leaves the clipboard alone
+
 
 class Timer(Protocol):
     """A one-shot scheduler, so this layer needs no main loop of its own."""
@@ -125,6 +131,7 @@ class Guard:
         self._held_handle: Any = None
         self._last_finding_count = 0
         self._last_secret_hashes: tuple[str, ...] = ()
+        self.last_outcome = LEFT
         self._injector = None
 
         # Installed last, deliberately: the gate reads `paused`, which needs
@@ -303,11 +310,14 @@ class Guard:
         )
         self._last_secret_hashes = clean.hashes
 
+        self.last_outcome = LEFT
         if self.effective_mode == "redact":
             # Replace first. This is what makes ignoring the dialog safe.
             if self._write(clean.text, clean.representations, event.flavour):
+                self.last_outcome = REMOVED
                 self.hold_original(event, clean.result.labels)
             else:
+                self.last_outcome = NOT_REMOVED
                 log.error("could not replace the clipboard; it still holds the secret")
 
         if self.on_detection is not None:

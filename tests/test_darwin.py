@@ -571,6 +571,34 @@ def test_polling_shell_ask_mode_swaps_first_and_holds_nothing(tmp_path, monkeypa
     assert shell.guard._held is None
 
 
+def test_polling_shell_does_not_claim_a_removal_that_failed(tmp_path, monkeypatch) -> None:
+    """A redaction the pasteboard refused leaves the secret where it was."""
+    import safepaste.config as config_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    notes: list[tuple[str, str]] = []
+    shell = PollingShell(
+        config_mod.Config(mode="redact").validated(),
+        backend=DarwinBackend(pasteboard=board),
+        notify=lambda t, b: (notes.append((t, b)), True)[1],
+    )
+    shell.guard.start()
+    board.external_copy({UTI_STRING: PAYLOAD})
+    board.clearContents = lambda: (_ for _ in ()).throw(RuntimeError("denied"))  # type: ignore[method-assign]
+    shell.guard.monitor.poll_once()
+
+    assert board.stringForType_(UTI_STRING) == PAYLOAD
+    title, body = notes[0]
+    assert "could not be removed" in title
+    assert "removed from" not in title
+    assert "still holds" in body
+
+
 def test_polling_shell_does_not_claim_removal_in_notify_mode(tmp_path, monkeypatch) -> None:
     """In notify mode the clipboard is untouched, so "removed" would be a lie."""
     import safepaste.config as config_mod
@@ -798,6 +826,14 @@ def test_macos_status_line_does_not_claim_removal_in_other_modes() -> None:
     tray.set_state("notify", False)
     tray.set_alert(2)
     assert "found" in tray.build_menu_items()[0][1]
+
+
+def test_macos_status_line_does_not_claim_a_failed_removal() -> None:
+    tray = _darwin_tray()
+    tray.set_state("redact", False)
+    tray.set_alert(1, removed=False)
+    assert "found" in tray.build_menu_items()[0][1]
+    assert "still on" in tray._tooltip()
 
 
 def test_macos_symbol_follows_state() -> None:

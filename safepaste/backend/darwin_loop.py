@@ -249,6 +249,7 @@ class Tray:
         self._mode = "redact"
         self._paused = False
         self._alert: int | None = None
+        self._removed: bool | None = None
 
     # -- state -------------------------------------------------------------
 
@@ -265,9 +266,13 @@ class Tray:
         self._mode, self._paused, self._alert = mode, paused, None
         self._refresh()
 
-    def set_alert(self, secrets: int) -> None:
+    def set_alert(self, secrets: int, removed: bool | None = None) -> None:
         self._alert = secrets
+        self._removed = removed
         self._refresh()
+
+    def _alert_removed(self) -> bool:
+        return self._mode == "redact" if self._removed is None else self._removed
 
     def clear_alert(self) -> None:
         self._alert = None
@@ -283,7 +288,7 @@ class Tray:
     def _tooltip(self) -> str:
         if self._alert is not None:
             noun = "secret" if self._alert == 1 else "secrets"
-            verb = "removed from" if self._mode == "redact" else "still on"
+            verb = "removed from" if self._alert_removed() else "still on"
             return f"{self._alert} {noun} {verb} the clipboard"
         if self._paused:
             return "Paused"
@@ -301,7 +306,7 @@ class Tray:
 
         status = (
             f"{self._alert} secret{'s' if self._alert != 1 else ''} "
-            f"{'removed' if self._mode == 'redact' else 'found'}"
+            f"{'removed' if self._alert_removed() else 'found'}"
             if self._alert is not None
             else "Paused" if self._paused
             else "Protection off" if self._mode == "off"

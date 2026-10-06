@@ -27,7 +27,7 @@ from typing import Any
 
 from . import config as config_mod, hardening
 from .backend import Backend, get_backend
-from .guard import Guard
+from .guard import NOT_REMOVED, REMOVED, Guard
 
 log = logging.getLogger(__name__)
 
@@ -118,9 +118,10 @@ class PollingShell:
         labels = ", ".join(result.labels[:3]) or "unknown"
         if len(result.labels) > 3:
             labels += f", and {len(result.labels) - 3} more"
+        outcome = self.guard.last_outcome
 
         if self._tray is not None:
-            self._tray.set_alert(secrets)
+            self._tray.set_alert(secrets, removed=outcome == REMOVED)
             # And take it down again. Without this one detection leaves the tray
             # reading "1 secret removed" for the rest of the session -- a claim
             # about the past sitting where the current state belongs. There is no
@@ -131,9 +132,12 @@ class PollingShell:
                 ALERT_FALLBACK_SECS, self._expire_alert
             )
 
-        if self.guard.effective_mode == "redact":
+        if outcome == REMOVED:
             title = f"{secrets} {noun} removed from the clipboard"
             body = f"{labels}. {result.chars_kept:,} characters kept."
+        elif outcome == NOT_REMOVED:
+            title = f"{secrets} {noun} could not be removed"
+            body = f"{labels}. The clipboard still holds {'it' if secrets == 1 else 'them'}."
         else:
             # In every other mode the clipboard is untouched, and saying "removed"
             # would be a plain untruth about a secret that is still sitting there.

@@ -619,6 +619,15 @@ def test_the_status_line_does_not_claim_removal_in_other_modes() -> None:
     assert "found" in status and "removed" not in status
 
 
+def test_the_status_line_does_not_claim_a_failed_removal() -> None:
+    tray = _tray()
+    tray.set_state("redact", False)
+    tray.set_alert(1, removed=False)
+    status = tray.build_menu_items()[0][1]
+    assert "found" in status and "removed" not in status
+    assert "still on" in tray._tooltip()
+
+
 def test_the_tooltip_and_icon_follow_state() -> None:
     from safepaste.backend.win32_loop import IDI_INFORMATION, IDI_SHIELD, IDI_WARNING
 

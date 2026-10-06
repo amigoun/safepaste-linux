@@ -172,6 +172,23 @@ def test_a_failed_write_does_not_pretend_to_hold_an_original(guard_factory) -> N
     assert guard.restore_original() is False
 
 
+def test_a_failed_write_is_not_reported_as_a_removal(guard_factory) -> None:
+    """The front end words its notice from this; "removed" would be a lie."""
+    from safepaste.guard import LEFT, NOT_REMOVED, REMOVED
+
+    guard, _, events = guard_factory(mode="redact", write_succeeds=False)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert events and guard.last_outcome == NOT_REMOVED
+
+    guard, _, _ = guard_factory(mode="redact")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert guard.last_outcome == REMOVED
+
+    guard, _, _ = guard_factory(mode="notify")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert guard.last_outcome == LEFT
+
+
 def test_successful_write_retains_a_restorable_original(guard_factory) -> None:
     guard, backend, _ = guard_factory(mode="redact", restore_timeout_secs=60)
     guard.handle(ClipboardEvent.of(PAYLOAD))
