@@ -170,6 +170,9 @@ class Config:
             self.keep_prefix = 0
         if self.keep_suffix < 0:
             self.keep_suffix = 0
+        if "" in self.extra_rule_globs:
+            self._warnings.append("ignoring an empty extra_rule_globs entry")
+            self.extra_rule_globs = tuple(g for g in self.extra_rule_globs if g)
         keyed = tuple(h for h in self.excluded_hashes if is_keyed_digest(h))
         unkeyed = len(self.excluded_hashes) - len(keyed)
         if unkeyed:
@@ -225,7 +228,17 @@ class Config:
     def extra_rule_paths(self) -> list[pathlib.Path]:
         found: list[pathlib.Path] = []
         for pattern in self.extra_rule_globs:
-            found.extend(sorted(CONFIG_DIR.glob(pattern)))
+            # Relative to the config directory; an absolute or ~ pattern is
+            # globbed from its own anchor, since Path.glob refuses those outright.
+            try:
+                target = pathlib.Path(pattern).expanduser()
+                root, relative = CONFIG_DIR, pattern
+                if target.is_absolute():
+                    root = pathlib.Path(target.anchor)
+                    relative = str(target.relative_to(root))
+                found.extend(sorted(root.glob(relative)))
+            except (ValueError, RuntimeError, OSError) as exc:
+                log.warning("ignoring extra_rule_globs entry %r: %s", pattern, exc)
         return found
 
 
@@ -247,6 +260,42 @@ _SECTIONS = {
 POLICY_SECTION = "policy"
 
 
+_DEFAULTS = Config()
+_WRONG_TYPE = object()
+_TOML_TYPE_NAMES = {
+    bool: "true or false",
+    int: "a whole number",
+    float: "a number",
+    str: "a quoted string",
+    tuple: "a list of strings",
+}
+
+
+def _typed(value: object, default: object) -> object:
+    """`value` as the type of `default`, or _WRONG_TYPE if it is not one.
+
+    bool is checked before int because it is an int subclass: `keep_prefix =
+    true` is a mistake, not 1. An int is fine where a float is wanted, since
+    `regex_timeout = 1` is how most people would write one second.
+    """
+    if isinstance(default, bool):
+        return value if isinstance(value, bool) else _WRONG_TYPE
+    if isinstance(value, bool):
+        return _WRONG_TYPE
+    if isinstance(default, int):
+        return value if isinstance(value, int) else _WRONG_TYPE
+    if isinstance(default, float):
+        return float(value) if isinstance(value, (int, float)) else _WRONG_TYPE
+    if isinstance(default, str):
+        return value if isinstance(value, str) else _WRONG_TYPE
+    if isinstance(default, tuple):
+        # Every tuple field in the schema is a list of strings.
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            return tuple(value)
+        return _WRONG_TYPE
+    return _WRONG_TYPE  # pragma: no cover - a field type this schema lacks
+
+
 def load(path: pathlib.Path | None = None) -> Config:
     path = path or CONFIG_FILE
     if not path.exists():
@@ -261,6 +310,9 @@ def load(path: pathlib.Path | None = None) -> Config:
 
     known = {f.name for f in fields(Config) if not f.name.startswith("_")}
     values: dict[str, object] = {}
+    # A value of the wrong type keeps that key's default rather than reaching
+    # validated(), which compares and iterates on the assumption it is right.
+    wrong_type: list[str] = []
     for section, keys in _SECTIONS.items():
         block = doc.get(section) or {}
         if not isinstance(block, dict):
@@ -269,8 +321,15 @@ def load(path: pathlib.Path | None = None) -> Config:
             if key not in known or key not in keys:
                 log.warning("ignoring unknown config key [%s].%s", section, key)
                 continue
-            # Tuple-typed fields arrive as TOML arrays.
-            values[key] = tuple(value) if isinstance(value, list) else value
+            default = getattr(_DEFAULTS, key)
+            typed = _typed(value, default)
+            if typed is _WRONG_TYPE:
+                wrong_type.append(
+                    f"ignoring [{section}].{key}: it should be "
+                    f"{_TOML_TYPE_NAMES[type(default)]}, so the default applies"
+                )
+                continue
+            values[key] = typed
 
     policy = doc.get(POLICY_SECTION) or {}
     if isinstance(policy, dict):
@@ -278,7 +337,9 @@ def load(path: pathlib.Path | None = None) -> Config:
             (str(app), str(mode)) for app, mode in policy.items()
         )
 
-    return Config(**values).validated()  # type: ignore[arg-type]
+    cfg = Config(**values)  # type: ignore[arg-type]
+    cfg._warnings.extend(wrong_type)
+    return cfg.validated()
 
 
 def save(cfg: Config, path: pathlib.Path | None = None) -> None:
