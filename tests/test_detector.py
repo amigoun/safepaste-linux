@@ -983,6 +983,35 @@ def test_a_rule_over_its_time_budget_is_named_as_skipped() -> None:
     assert result.incomplete is True
 
 
+def test_a_rule_that_spends_its_whole_scan_budget_is_skipped(monkeypatch) -> None:
+    """Each window has its own timeout, so without a budget across them one
+    slow rule could cost a timeout per window on a large paste."""
+    import types
+
+    from safepaste.detector import engine
+
+    rule = Rule(
+        id="test-slow",
+        description="a rule that takes a second per window on a slow clock",
+        pattern=regex.compile(r"key=([A-Za-z0-9]{16,})"),
+        keywords=(),
+        category="api_keys",
+    )
+    text = "nothing to see here\n" * 20_000 + "key=Zq8vR2kLmN4pT7wXbY9c\n"
+    assert len(engine._windows(text)) > 5
+    detector = Detector(ruleset=RuleSet(rules=[rule]), regex_timeout=1.0)
+    assert not detector.scan(text).incomplete
+
+    ticks = iter(range(1_000_000))
+    monkeypatch.setattr(
+        engine, "time", types.SimpleNamespace(monotonic=lambda: float(next(ticks)))
+    )
+    result = detector.scan(text)
+
+    assert result == []
+    assert result.skipped_rules == ("test-slow",)
+
+
 # ---------------------------------------------------------------------------
 # The CLI's exit code for an incomplete scan
 # ---------------------------------------------------------------------------

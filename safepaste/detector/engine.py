@@ -73,6 +73,10 @@ SCAN_WINDOW_OVERLAP = 8_192
 # `kind: Secret` under a Secret's `data:`, past a long annotation -- failed
 # whenever that fell beyond the window.
 SCAN_READ_AHEAD = 32_768
+# What one rule may spend on one scan, in regex timeouts. The timeout is per
+# window, so without a cap across windows a rule slow on a megabyte could cost
+# a timeout per window -- per representation, on the thread the UI runs on.
+RULE_BUDGET_TIMEOUTS = 4
 
 
 # Named in the digest itself, so a config file states which algorithm produced
@@ -279,6 +283,13 @@ class Detector:
             return False
         return value_hash(secret, self.exclusion_key) in self.excluded_hashes
 
+    def _time_left(self, deadline: float) -> float:
+        """The timeout for a rule's next regex call, within its scan budget."""
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the rule's scan budget is spent")
+        return min(self.regex_timeout, left)
+
     def scan(self, text: str) -> ScanResult:
         if not text:
             return ScanResult()
@@ -310,10 +321,11 @@ class Detector:
             if rule.keywords and not any(k in lowered for k in rule.keywords):
                 continue
             matches: list[regex.Match] = []
+            deadline = time.monotonic() + self.regex_timeout * RULE_BUDGET_TIMEOUTS
             try:
                 for pos, endpos, owned in windows:
                     for m in rule.pattern.finditer(
-                        text, pos, endpos, timeout=self.regex_timeout
+                        text, pos, endpos, timeout=self._time_left(deadline)
                     ):
                         if m.start() >= owned:
                             break
@@ -326,15 +338,15 @@ class Detector:
                             # `$` or `\b`, made this one; and a timeout here
                             # skips the rule like any other.
                             m = rule.pattern.match(
-                                text, m.start(), timeout=self.regex_timeout
+                                text, m.start(), timeout=self._time_left(deadline)
                             )
                             if m is None:
                                 continue
                         matches.append(m)
             except TimeoutError:
-                # A pathological input made this rule superlinear. Drop it for
-                # the rest of this scan rather than hang the clipboard; whatever
-                # it found in earlier windows still stands.
+                # A pathological input made this rule superlinear, or it spent
+                # its budget. Drop it for the rest of this scan rather than hang
+                # the clipboard; whatever it found in earlier windows stands.
                 timed_out.append(rule.id)
             except regex.error as exc:  # pragma: no cover - defensive
                 log.warning("rule %s failed at match time: %s", rule.id, exc)
@@ -386,9 +398,11 @@ class Detector:
         elapsed = time.monotonic() - started
         if timed_out:
             log.warning(
-                "%d rule(s) exceeded the %.0fms regex budget and were skipped: %s",
+                "%d rule(s) exceeded the %.0fms regex timeout or %.0fms scan "
+                "budget and were skipped: %s",
                 len(timed_out),
                 self.regex_timeout * 1000,
+                self.regex_timeout * RULE_BUDGET_TIMEOUTS * 1000,
                 ", ".join(sorted(timed_out)),
             )
         if truncated:
