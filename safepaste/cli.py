@@ -35,6 +35,7 @@ from .detector import (
     Finding,
     Rule,
     RuleSet,
+    ScanResult,
     load_default,
     summarise,
     value_hash,
@@ -161,6 +162,21 @@ def _finding_dict(finding: Finding, text: str) -> dict[str, object]:
     }
 
 
+def _incomplete_note(findings: ScanResult, max_bytes: int) -> str | None:
+    """One stderr line saying what a scan did not cover, or None if complete."""
+    if not findings.incomplete:
+        return None
+    reasons = []
+    if findings.skipped_rules:
+        reasons.append(
+            "rule(s) over the time budget and skipped: "
+            + ", ".join(findings.skipped_rules)
+        )
+    if findings.truncated:
+        reasons.append(f"input beyond {max_bytes} bytes not scanned")
+    return "safepaste: scan incomplete -- " + "; ".join(reasons)
+
+
 # --------------------------------------------------------------------------
 # scan
 # --------------------------------------------------------------------------
@@ -196,10 +212,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 f"({f.length} chars, entropy {entropy_str})"
             )
 
+    note = _incomplete_note(findings, args.max_bytes)
+    if note:
+        print(note, file=sys.stderr)
+
     # However the findings were rendered above, the exit code always reflects
     # "was anything found" -- that is the one thing a shell composes on
-    # (`safepaste scan f && upload f`), independent of --json/--summary.
-    return 1 if findings else 0
+    # (`safepaste scan f && upload f`), independent of --json/--summary. An
+    # incomplete scan that found nothing has not shown the text is clean, so it
+    # exits 2 like unreadable input rather than 0.
+    if findings:
+        return 1
+    return 2 if note else 0
 
 
 # --------------------------------------------------------------------------
@@ -237,6 +261,9 @@ def cmd_redact(args: argparse.Namespace) -> int:
         )
     else:
         print("safepaste: no secrets found, output unchanged", file=sys.stderr)
+    note = _incomplete_note(findings, args.max_bytes)
+    if note:
+        print(note, file=sys.stderr)
 
     # "Exit 0 always unless the input could not be read" -- finding secrets is
     # the expected, successful case for this command, not a failure.
@@ -458,7 +485,8 @@ def _build_parser() -> argparse.ArgumentParser:
     scan_p = subparsers.add_parser(
         "scan",
         parents=[common],
-        help="find secrets in a file or stdin; exit 1 if any were found",
+        help="find secrets in a file or stdin; exit 1 if any were found, 2 if "
+        "the input could not be read or not all of it could be scanned",
     )
     scan_p.add_argument(
         "path", nargs="?", default="-", help="file to scan, or - for stdin (default)"

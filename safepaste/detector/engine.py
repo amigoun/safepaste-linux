@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import regex
@@ -47,6 +48,15 @@ log = logging.getLogger(__name__)
 # all of it buys nothing and costs latency on every copy.
 DEFAULT_MAX_SCAN_BYTES = 1_048_576
 DEFAULT_REGEX_TIMEOUT = 0.25
+
+# Each rule runs over windows of the text rather than the whole of it, because
+# the timeout is per call: one call over a megabyte of ordinary log text can
+# blow the budget on cost alone, which skipped the rule and missed a key sitting
+# at the end. Windows keep every call small enough to finish. The overlap has to
+# hold the longest match worth finding whole -- a 4096-bit PEM key is ~3.3 KB --
+# since a match is only kept by the window it starts in.
+SCAN_WINDOW_CHARS = 65_536
+SCAN_WINDOW_OVERLAP = 8_192
 
 
 # Named in the digest itself, so a config file states which algorithm produced
@@ -107,6 +117,31 @@ class Finding:
     @property
     def category_label(self) -> str:
         return CATEGORY_LABELS.get(self.category, self.category)
+
+
+class ScanResult(list[Finding]):
+    """Findings, plus whether they cover the whole input.
+
+    A list so that every caller written against `list[Finding]` keeps working.
+    The extra attributes exist because "no findings" is only a clean bill when
+    the scan was complete: a skipped rule or a truncated input can hide a secret,
+    and a caller that cannot tell would report that text as safe.
+    """
+
+    def __init__(
+        self,
+        findings: Iterable[Finding] = (),
+        *,
+        skipped_rules: Iterable[str] = (),
+        truncated: bool = False,
+    ) -> None:
+        super().__init__(findings)
+        self.skipped_rules: tuple[str, ...] = tuple(skipped_rules)
+        self.truncated = truncated
+
+    @property
+    def incomplete(self) -> bool:
+        return self.truncated or bool(self.skipped_rules)
 
 
 class Detector:
@@ -213,9 +248,9 @@ class Detector:
             return False
         return value_hash(secret, self.exclusion_key) in self.excluded_hashes
 
-    def scan(self, text: str) -> list[Finding]:
+    def scan(self, text: str) -> ScanResult:
         if not text:
-            return []
+            return ScanResult()
 
         # Byte-budget the scan, but cut on a character boundary so offsets stay
         # valid for the caller's string. `text[:max_scan_bytes]` would slice by
@@ -234,20 +269,30 @@ class Detector:
             truncated = True
 
         lowered = text.lower()
+        windows = _windows(text)
         findings: list[Finding] = []
+        seen: set[tuple[str, int, int]] = set()
         timed_out: list[str] = []
         started = time.monotonic()
 
         for rule in self._active:
             if rule.keywords and not any(k in lowered for k in rule.keywords):
                 continue
+            matches: list[regex.Match] = []
             try:
-                matches = list(rule.pattern.finditer(text, timeout=self.regex_timeout))
+                for pos, endpos, owned in windows:
+                    matches.extend(
+                        m
+                        for m in rule.pattern.finditer(
+                            text, pos, endpos, timeout=self.regex_timeout
+                        )
+                        if m.start() < owned
+                    )
             except TimeoutError:
-                # A pathological input made this rule superlinear. Drop the rule
-                # for this scan rather than hang the clipboard.
+                # A pathological input made this rule superlinear. Drop it for
+                # the rest of this scan rather than hang the clipboard; whatever
+                # it found in earlier windows still stands.
                 timed_out.append(rule.id)
-                continue
             except regex.error as exc:  # pragma: no cover - defensive
                 log.warning("rule %s failed at match time: %s", rule.id, exc)
                 continue
@@ -255,6 +300,11 @@ class Detector:
             for m in matches:
                 span = self._secret_span(m, rule)
                 if span is None:
+                    continue
+                # A match near a window edge can be found again, cut short, by
+                # the next window; the secret span is what identifies it.
+                key = (rule.id, span[0], span[1])
+                if key in seen:
                     continue
                 secret = text[span[0] : span[1]]
                 # Our own output is not a finding. Checked against the secret
@@ -275,6 +325,7 @@ class Detector:
                     for a in self.ruleset.global_allowlists
                 ):
                     continue
+                seen.add(key)
                 findings.append(
                     Finding(
                         rule_id=rule.id,
@@ -296,15 +347,50 @@ class Detector:
                 self.regex_timeout * 1000,
                 ", ".join(sorted(timed_out)),
             )
+        if truncated:
+            log.info(
+                "input exceeds the %d-byte scan cap; the rest was not scanned",
+                self.max_scan_bytes,
+            )
         log.debug(
-            "scanned %d chars in %.1fms, %d finding(s)%s",
+            "scanned %d chars in %d window(s), %.1fms, %d finding(s)",
             len(text),
+            len(windows),
             elapsed * 1000,
             len(findings),
-            " (input truncated to scan cap)" if truncated else "",
         )
         findings.sort(key=lambda f: (f.start, f.end, f.rule_id))
-        return findings
+        return ScanResult(
+            findings, skipped_rules=sorted(timed_out), truncated=truncated
+        )
+
+
+def _windows(text: str) -> list[tuple[int, int, int]]:
+    r"""`(pos, endpos, owned)` per window: scan text[pos:endpos], keep matches
+    starting before `owned`.
+
+    Each window owns the stretch up to where the next begins and reads on for at
+    least the overlap past it, so a match no longer than the overlap is seen
+    whole by exactly one window. Boundaries fall on line ends where one is near,
+    because `^`, `$` and `\b` treat a window edge as the edge of the text; a
+    line longer than a window is cut mid-way, and the overlap covers the seam.
+    Scanning with pos/endpos rather than slicing keeps offsets those of `text`
+    and lets lookbehinds see past the window's start.
+    """
+    n = len(text)
+    out: list[tuple[int, int, int]] = []
+    pos = 0
+    while n - pos > SCAN_WINDOW_CHARS:
+        limit = pos + SCAN_WINDOW_CHARS
+        stride = limit - SCAN_WINDOW_OVERLAP
+        newline = text.rfind("\n", pos, stride)
+        nxt = newline + 1 if newline > pos else stride
+        newline = text.rfind("\n", nxt + SCAN_WINDOW_OVERLAP - 1, limit)
+        endpos = newline + 1 if newline != -1 else limit
+        out.append((pos, endpos, nxt))
+        pos = nxt
+    out.append((pos, n, n))
+    return out
 
 
 def _line_containing(text: str, index: int) -> str:

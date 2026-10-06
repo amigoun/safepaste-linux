@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from safepaste.detector import Detector, Finding, merge_spans, summarise, value_hash
-from safepaste.detector.rules import RuleSet
+import random
+
+import regex
+
+from safepaste.detector import (
+    Detector,
+    Finding,
+    ScanResult,
+    merge_spans,
+    summarise,
+    value_hash,
+)
+from safepaste.detector.rules import Rule, RuleSet
 
 # ---------------------------------------------------------------------------
 # True positives: one representative case per rule family.
@@ -357,6 +368,167 @@ def test_max_scan_bytes_truncates_before_but_not_after(ruleset: RuleSet) -> None
     # Secret starts at offset 201, after the cap, so it is cut away entirely.
     after_text = ("x" * cap) + " " + secret + " " + ("y" * 50)
     assert d.scan(after_text) == []
+
+
+# ---------------------------------------------------------------------------
+# Large inputs: scanned in full, and anything left unscanned is said out loud
+# ---------------------------------------------------------------------------
+
+_AWS_SECRET = "wJq7Kd2LmN9pRs4TvXbZ8cE1fG3hJ5kL7nQ0rS2u"
+
+
+def _config_log(size: int) -> str:
+    """Debug output dense with the words generic-api-key keys on.
+
+    Shaped like this because it is what made that rule cost more than its
+    timeout over a whole paste: half a megabyte of it was enough.
+    """
+    rng = random.Random(3)
+    names = ["api_key_id", "auth_token_ttl", "secret_ref", "access_key_hint",
+             "client_secret_name", "password_policy"]
+    values = ["enabled", "default", "none", "rotate-weekly", "v2", "kms-alias"]
+    lines: list[str] = []
+    total = 0
+    while total < size:
+        pairs = " ".join(
+            f"{rng.choice(names)}={rng.choice(values)}" for _ in range(4)
+        )
+        line = f"2026-10-06 12:00:00,{rng.randint(0, 999):03d} DEBUG config: {pairs}"
+        lines.append(line)
+        total += len(line) + 1
+    return "\n".join(lines) + "\n"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("size", [500_000, 1_000_000], ids=["500KB", "1MB"])
+def test_a_secret_at_the_end_of_a_large_log_is_found(
+    detector: Detector, size: int
+) -> None:
+    text = _config_log(size) + f"AWS_SECRET_ACCESS_KEY={_AWS_SECRET}\n"
+    assert len(text.encode()) <= detector.max_scan_bytes
+
+    findings = detector.scan(text)
+
+    assert not findings.incomplete, f"skipped: {findings.skipped_rules}"
+    assert _AWS_SECRET in [text[f.start : f.end] for f in findings]
+
+
+@pytest.mark.parametrize("offset", range(57_000, 58_200, 150))
+def test_a_key_across_a_window_seam_is_found_once_and_whole(
+    detector: Detector, offset: int
+) -> None:
+    """Windows overlap, so the seam can neither cut a key nor report it twice."""
+    pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        + "MIIEpQIBAAKCAQEAv3Hs9YbKq2Nx7RtLpMz4WgVj8DcFo1SaXeUh6TnBk0IrPq5C\n" * 50
+        + "-----END RSA PRIVATE KEY-----"
+    )
+    filler = "the quick brown fox jumps over the lazy dog\n"
+    head = (filler * (offset // len(filler) + 1))[:offset]
+    text = head + "\n" + pem + "\n" + filler * 2000
+
+    keys = [f for f in detector.scan(text) if f.rule_id == "private-key"]
+
+    assert [text[f.start : f.end] for f in keys] == [pem]
+
+
+def test_scan_result_is_a_list_that_says_whether_it_is_complete(
+    detector: Detector,
+) -> None:
+    result = detector.scan("GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z")
+
+    assert isinstance(result, ScanResult) and isinstance(result, list)
+    assert result.incomplete is False
+    assert result.skipped_rules == ()
+    assert result.truncated is False
+    assert isinstance(detector.scan(""), ScanResult)
+
+
+def test_text_past_the_scan_cap_marks_the_result_incomplete(ruleset: RuleSet) -> None:
+    d = Detector(ruleset=ruleset, max_scan_bytes=200)
+
+    result = d.scan("x" * 500)
+
+    assert result == []
+    assert result.truncated is True
+    assert result.incomplete is True
+
+
+def test_a_rule_over_its_time_budget_is_named_as_skipped() -> None:
+    slow = Rule(
+        id="test-catastrophic",
+        description="nested quantifiers, exponential on a near miss",
+        pattern=regex.compile(r"(?:a|a)+$"),
+        keywords=(),
+        category="api_keys",
+    )
+    d = Detector(ruleset=RuleSet(rules=[slow]), regex_timeout=0.01)
+
+    result = d.scan("a" * 40 + "!")
+
+    assert result == []
+    assert result.skipped_rules == ("test-catastrophic",)
+    assert result.incomplete is True
+
+
+# ---------------------------------------------------------------------------
+# The CLI's exit code for an incomplete scan
+# ---------------------------------------------------------------------------
+
+
+def _cli(argv: list[str]) -> int:
+    from safepaste import cli
+
+    args = cli._build_parser().parse_args(argv)
+    return args.func(args)
+
+
+def test_scan_exits_2_when_it_found_nothing_but_did_not_scan_everything(
+    tmp_path, capsys
+) -> None:
+    path = tmp_path / "big.txt"
+    path.write_text("nothing to see here\n" * 200, encoding="utf-8")
+
+    code = _cli(["scan", "--max-bytes", "1024", str(path)])
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "scan incomplete" in err and "1024 bytes" in err
+    assert len(err.strip().splitlines()) == 1
+
+
+def test_scan_still_exits_1_on_findings_but_warns_when_incomplete(
+    tmp_path, capsys
+) -> None:
+    path = tmp_path / "big.txt"
+    path.write_text(
+        "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z\n"
+        + "nothing to see here\n" * 200,
+        encoding="utf-8",
+    )
+
+    code = _cli(["scan", "--max-bytes", "1024", str(path)])
+
+    assert code == 1
+    assert "scan incomplete" in capsys.readouterr().err
+
+
+def test_a_complete_clean_scan_still_exits_0(tmp_path, capsys) -> None:
+    path = tmp_path / "small.txt"
+    path.write_text("nothing to see here\n", encoding="utf-8")
+
+    assert _cli(["scan", str(path)]) == 0
+    assert "incomplete" not in capsys.readouterr().err
+
+
+def test_redact_warns_when_its_scan_was_incomplete(tmp_path, capsys) -> None:
+    path = tmp_path / "big.txt"
+    path.write_text("nothing to see here\n" * 200, encoding="utf-8")
+
+    code = _cli(["redact", "--max-bytes", "1024", str(path)])
+
+    assert code == 0
+    assert "scan incomplete" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
