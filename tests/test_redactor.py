@@ -323,3 +323,41 @@ def test_a_redacted_url_password_rescans_clean_whatever_it_contained(
             assert password[4:-4] not in result.text
             assert result.text.endswith(text[text.rindex("@") :])
             assert detector.scan(result.text) == [], f"rescan flagged {result.text!r}"
+
+
+def test_labelled_output_rescans_clean_and_redacting_it_again_changes_nothing(
+    detector: Detector,
+) -> None:
+    """`--label-rules` output is SafePaste's own output too.
+
+    Only the bare placeholder used to be recognised, so `[REDACTED:rule-id]`
+    in a URL or a password assignment was flagged on every rescan, and
+    redacting it again wrapped the label in a second one.
+    """
+    for text in (
+        "DATABASE_URL=postgres://svc_user:h1ghlyS3cretPw@db.internal:5432/prod",
+        "export DB_PASSWORD=Kx92mQzR7v",
+        '{"password": "Zq8v!R2k$LmN4pT7w"}',
+        "kind: Secret\ndata:\n  token: Zq8vR2kLmN4pT7wXbY9c\n",
+        "DATADOG_API_KEY=4f9b2ac7e1d3805f6b2e9c4a7d1f0836ac52e9d4",
+    ):
+        for style in (
+            RedactionStyle(label_rules=True),
+            RedactionStyle(label_rules=True, keep_prefix=0, keep_suffix=0),
+        ):
+            once = redact(text, detector.scan(text), style)
+            assert once.changed, f"nothing detected in {text!r}"
+            assert detector.scan(once.text) == [], f"rescan flagged {once.text!r}"
+            twice = redact(once.text, detector.scan(once.text), style)
+            assert twice.text == once.text
+
+
+def test_a_labelled_custom_placeholder_is_recognised(ruleset) -> None:
+    text = "export DB_PASSWORD=Kx92mQzR7v"
+    style = RedactionStyle(placeholder="<<HIDDEN>>", label_rules=True)
+    detector = Detector(ruleset=ruleset, placeholder="<<HIDDEN>>")
+
+    once = redact(text, detector.scan(text), style)
+
+    assert "<<HIDDEN>>:safepaste-env-password-assignment]" in once.text
+    assert detector.scan(once.text) == []

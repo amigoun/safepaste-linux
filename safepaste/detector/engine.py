@@ -36,6 +36,16 @@ from .rules import CATEGORY_LABELS, Rule, RuleSet, load_default
 # from this module, so the constant cannot live there without a cycle.
 DEFAULT_PLACEHOLDER = "[REDACTED]"
 
+
+def labelled_placeholder(placeholder: str, rule_ids: Iterable[str]) -> str:
+    """The placeholder naming the rules that fired: `[REDACTED:aws-access-token]`.
+
+    Built here, beside the code that recognises it, so the redactor's output
+    and the detector's idea of that output cannot drift apart.
+    """
+    return f"{placeholder.rstrip(']')}:{','.join(rule_ids)}]"
+
+
 # A placeholder shorter than this is not used to suppress anything. The check is
 # a substring test, so a one-character placeholder would match inside nearly
 # every secret and quietly switch detection off altogether -- the worst failure
@@ -187,6 +197,14 @@ class Detector:
         # placeholder too short to use means redacted text starts being flagged
         # again and nothing else would say why.
         self._suppress_placeholder = len(placeholder) >= MIN_SUPPRESSING_PLACEHOLDER
+        # The labelled form counts too, or `--label-rules` output is flagged
+        # on every rescan. Its prefix must clear the same length floor, or a
+        # placeholder that is mostly `]` would match any `:word]`.
+        labelled_prefix = labelled_placeholder(placeholder, [])[:-1]
+        forms = [regex.escape(placeholder)]
+        if len(labelled_prefix) > MIN_SUPPRESSING_PLACEHOLDER:
+            forms.append(regex.escape(labelled_prefix) + r"[^\s\]]+\]")
+        self._placeholder_pattern = regex.compile("|".join(forms))
         if placeholder and not self._suppress_placeholder:
             log.warning(
                 "placeholder %r is shorter than %d characters, so already-redacted "
@@ -212,7 +230,9 @@ class Detector:
         re-copying a sanitised URL raised a second dialog about a secret that
         was no longer there.
         """
-        return self._suppress_placeholder and self.placeholder in secret
+        return self._suppress_placeholder and bool(
+            self._placeholder_pattern.search(secret)
+        )
 
     def _secret_spans(self, m: regex.Match, rule: Rule) -> list[tuple[int, int]]:
         """Which slices of the match are the secret itself.
