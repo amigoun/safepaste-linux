@@ -31,6 +31,7 @@ from safepaste.backend import (
 )
 from safepaste.backend.darwin import (
     UTI_HTML,
+    UTI_RTF,
     UTI_STRING,
     DarwinBackend,
     DarwinClipboardMonitor,
@@ -134,6 +135,35 @@ def test_reader_returns_none_when_there_is_no_plain_text() -> None:
     assert DarwinClipboardReader(board).read_text() is None
 
 
+def test_reader_carries_the_text_bearing_representations() -> None:
+    """HTML and RTF can hold what the plain text lacks, so both reach the guard."""
+    html = '<a href="https://ci.example/?t=1">report</a>'
+    board = FakePasteboard({UTI_STRING: "report", UTI_HTML: html, UTI_RTF: "{\\rtf1 report}"})
+    event = DarwinClipboardReader(board).read_text()
+    assert event is not None
+    assert event.representations == {UTI_HTML: html, UTI_RTF: "{\\rtf1 report}"}
+
+
+def test_an_html_only_pasteboard_is_still_read() -> None:
+    """macOS synthesises plain text from RTF but not from HTML."""
+    board = FakePasteboard({UTI_HTML: f"<p>GITHUB_TOKEN={SECRET}</p>"})
+    event = DarwinClipboardReader(board).read_text()
+    assert event is not None and event.text == ""
+    assert UTI_HTML in event.representations
+
+
+def test_same_text_over_different_markup_is_a_different_value() -> None:
+    """Two links with the same visible text must not be deduplicated as one copy."""
+    first = DarwinClipboardReader(
+        FakePasteboard({UTI_STRING: "report", UTI_HTML: '<a href="/a">report</a>'})
+    ).read_text()
+    second = DarwinClipboardReader(
+        FakePasteboard({UTI_STRING: "report", UTI_HTML: '<a href="/b">report</a>'})
+    ).read_text()
+    assert first is not None and second is not None
+    assert first.digest != second.digest
+
+
 # --- writer ---------------------------------------------------------------
 
 
@@ -167,6 +197,19 @@ def test_multi_flavour_write_keeps_both_representations(board: FakePasteboard) -
 
 def test_multi_flavour_write_rejects_nothing_to_write(board: FakePasteboard) -> None:
     assert DarwinClipboardWriter(board).write_flavours({}) is False
+
+
+def test_rich_representations_are_written_as_ascii() -> None:
+    """Pasted HTML without a charset is read as Latin-1, and RTF is 7-bit, so the
+    placeholder's ellipsis would arrive as mojibake. Measured on a real Mac."""
+    from safepaste.backend.darwin import pasteboard_form
+
+    assert pasteboard_form(UTI_HTML, "<b>a\u2026b</b>") == "<b>a&#8230;b</b>"
+    assert pasteboard_form(UTI_RTF, "{\\rtf1 a\u2026b}") == "{\\rtf1 a{\\uc1\\u8230?}b}"
+    # Outside the BMP, RTF wants a surrogate pair of signed 16-bit values.
+    assert pasteboard_form(UTI_RTF, "\U0001F511") == "{\\uc1\\u-10179?\\u-8943?}"
+    assert pasteboard_form(UTI_STRING, "a\u2026b") == "a\u2026b"
+    assert pasteboard_form(UTI_HTML, "<p>plain ascii</p>") == "<p>plain ascii</p>"
 
 
 # --- monitor: change-count polling ---------------------------------------
@@ -379,6 +422,88 @@ def test_the_whole_guard_pipeline_runs_on_the_darwin_backend(tmp_path, monkeypat
     assert seen_after == [], "restoring is our own write, not a new copy to redact"
 
     guard.stop()
+
+
+def _darwin_guard(tmp_path, monkeypatch, board: FakePasteboard, **cfg):
+    import safepaste.config as config_mod
+    from safepaste.guard import Guard
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+    cfg.setdefault("mode", "redact")
+    cfg.setdefault("restore_timeout_secs", 60)
+    guard = Guard(config_mod.Config(**cfg).validated(), backend=DarwinBackend(pasteboard=board))
+    assert guard.start() is True
+    return guard
+
+
+def _holds_secret(board: FakePasteboard) -> list[str]:
+    return [uti for uti in board.types() if SECRET in (board.stringForType_(uti) or "")]
+
+
+def test_a_secret_only_in_the_html_is_removed(tmp_path, monkeypatch) -> None:
+    """The plain text is a link's label; the token is in its URL.
+
+    Scanning the plain text alone called this clean and left the token on the
+    pasteboard for any application that pastes HTML.
+    """
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
+    html = f'<a href="https://ci.example/api?token={SECRET}">Download report</a>'
+    board.external_copy({UTI_STRING: "Download report", UTI_HTML: html})
+    guard.monitor.poll_once()
+
+    assert _holds_secret(board) == []
+    assert board.stringForType_(UTI_STRING) == "Download report"
+    assert "[REDACTED]" in (board.stringForType_(UTI_HTML) or ""), "the link is kept"
+
+
+def test_an_html_only_copy_is_scanned(tmp_path, monkeypatch) -> None:
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
+    board.external_copy({UTI_HTML: f"<p>GITHUB_TOKEN={SECRET}</p>"})
+    guard.monitor.poll_once()
+
+    assert _holds_secret(board) == []
+    assert "[REDACTED]" in (board.stringForType_(UTI_HTML) or "")
+
+
+def test_formatting_survives_a_redaction(tmp_path, monkeypatch) -> None:
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
+    board.external_copy(
+        {UTI_STRING: PAYLOAD, UTI_HTML: f"<pre>{PAYLOAD}</pre>", UTI_RTF: f"{{\\rtf1 {PAYLOAD}}}"}
+    )
+    guard.monitor.poll_once()
+
+    assert _holds_secret(board) == []
+    assert set(board.types()) == {UTI_STRING, UTI_HTML, UTI_RTF}
+    assert (board.stringForType_(UTI_HTML) or "").startswith("<pre>notes")
+
+    # The undo puts every representation back, and is not mistaken for a copy.
+    assert guard.restore_original() is True
+    assert board.stringForType_(UTI_HTML) == f"<pre>{PAYLOAD}</pre>"
+    guard.monitor.poll_once()
+    assert board.stringForType_(UTI_STRING) == PAYLOAD
+
+
+def test_markup_that_hides_the_secret_from_its_own_scan_is_dropped(
+    tmp_path, monkeypatch
+) -> None:
+    """Split by a tag, the token renders whole but scans as two harmless halves.
+
+    The plain text proves it is there, so a representation whose own scan cannot
+    account for it is dropped rather than trusted.
+    """
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
+    html = f"<p>GITHUB_TOKEN={SECRET[:12]}<b></b>{SECRET[12:]}</p>"
+    board.external_copy({UTI_STRING: PAYLOAD, UTI_HTML: html})
+    guard.monitor.poll_once()
+
+    assert board.types() == [UTI_STRING], "the HTML could not be shown clean"
+    assert SECRET not in (board.stringForType_(UTI_STRING) or "")
 
 
 # --- the polling shell ----------------------------------------------------

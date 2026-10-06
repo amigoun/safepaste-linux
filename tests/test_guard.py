@@ -258,6 +258,22 @@ def test_a_locked_session_is_skipped(guard_factory) -> None:
     assert backend.writer.writes == [] and events == []
 
 
+def test_a_secret_in_a_rich_representation_alone_is_still_removed(guard_factory) -> None:
+    """A link's label can be clean while its URL carries the token.
+
+    This writer can offer plain text only, so the redaction replaces the rich
+    representation with that rather than leaving it behind.
+    """
+    guard, backend, events = guard_factory(mode="redact")
+    html = f'<a href="https://ci.example/?token={SECRET}">report</a>'
+    guard.handle(ClipboardEvent.of("report", representations={"text/html": html}))
+
+    assert backend.writer.writes == ["report"]
+    assert len(events) == 1
+    _findings, result, _event = events[0]
+    assert result.secrets_removed == 1 and "GitHub PAT" in result.labels
+
+
 def test_clean_text_is_left_untouched(guard_factory) -> None:
     guard, backend, events = guard_factory(mode="redact")
     guard.handle(ClipboardEvent.of("an entirely ordinary sentence"))
