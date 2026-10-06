@@ -75,6 +75,10 @@ DEFAULT_CATEGORIES = tuple(c for c in CATEGORIES if c != "high_entropy")
 
 MODES = ("redact", "ask", "notify", "off")
 
+# Below this a scan stops looking at all but the start of a paste, which reads
+# as "clean" rather than as a limit having been hit.
+MIN_SCAN_BYTES = 1024
+
 
 @dataclass
 class Config:
@@ -169,7 +173,7 @@ class Config:
         if not 0.01 <= self.regex_timeout <= 10:
             self._warnings.append("regex_timeout out of range, using 0.25")
             self.regex_timeout = 0.25
-        if self.max_scan_bytes < 1024:
+        if self.max_scan_bytes < MIN_SCAN_BYTES:
             self._warnings.append("max_scan_bytes too small, using 1 MiB")
             self.max_scan_bytes = 1_048_576
         if self.keep_prefix < 0:

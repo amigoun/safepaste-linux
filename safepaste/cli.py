@@ -156,6 +156,19 @@ def _load_config(args: argparse.Namespace) -> config_mod.Config | None:
     return cfg
 
 
+def _scan_limit(value: str) -> int:
+    """--max-bytes, held to the floor config.toml has: a limit of zero scans
+    nothing and then exits 0, as if the input were clean."""
+    try:
+        limit = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    floor = config_mod.MIN_SCAN_BYTES
+    if limit < floor:
+        raise argparse.ArgumentTypeError(f"must be at least {floor}")
+    return limit
+
+
 def _rule_paths(
     args: argparse.Namespace, cfg: config_mod.Config | None
 ) -> list[pathlib.Path]:
@@ -501,10 +514,11 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--max-bytes",
         dest="max_bytes",
-        type=int,
+        type=_scan_limit,
         metavar="N",
-        help="scan at most this many input bytes (default: max_scan_bytes from "
-        f"config.toml, else {DEFAULT_MAX_SCAN_BYTES})",
+        help=f"scan at most this many input bytes, {config_mod.MIN_SCAN_BYTES} or "
+        "more (default: max_scan_bytes from config.toml, else "
+        f"{DEFAULT_MAX_SCAN_BYTES})",
     )
     # Not in `common`: `hash` has no settings to take from config.toml, and its
     # key has to come from the config directory regardless.

@@ -185,3 +185,22 @@ def test_a_config_problem_is_reported_on_stderr(
     code, out, err = _run(monkeypatch, capsys, ["scan", "-"], f"token {GITHUB}\n")
     assert code == 1 and "github-pat" in out
     assert "belongs under [protection]" in err
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "1023", "lots"])
+def test_a_scan_limit_below_the_floor_is_a_usage_error(
+    config_dir, monkeypatch, capsys, value: str
+) -> None:
+    """A limit of zero scanned nothing and exited 0, which reads as clean."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, capsys, ["scan", "--max-bytes", value, "-"], GITHUB)
+    assert exc.value.code == 2
+    assert "--max-bytes" in capsys.readouterr().err
+
+
+def test_the_scan_limit_floor_itself_is_accepted(
+    config_dir, monkeypatch, capsys
+) -> None:
+    floor = str(config_mod.MIN_SCAN_BYTES)
+    code, _, _ = _run(monkeypatch, capsys, ["scan", "--max-bytes", floor, "-"], GITHUB)
+    assert code == 1
