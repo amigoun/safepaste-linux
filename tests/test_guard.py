@@ -421,6 +421,32 @@ def test_a_partly_scanned_representation_is_not_kept(guard_factory) -> None:
     assert clean is not None and clean.representations == {}
 
 
+def test_a_secret_found_only_in_the_markup_is_removed_from_the_plain_text_too(
+    guard_factory,
+) -> None:
+    """Each representation is scanned on its own, so a value can be found in
+    one and missed in another; wherever it appears verbatim, it goes."""
+    guard, backend, _ = guard_factory(mode="redact")
+    real = guard.detector
+
+    class PlainBlind:
+        def scan(self, text: str):
+            return real.scan(text) if text.startswith("<") else real.scan("")
+
+    guard.detector = PlainBlind()
+    clean, _ = guard._sanitise(
+        ClipboardEvent.of(PAYLOAD, representations={"text/html": f"<pre>{PAYLOAD}</pre>"})
+    )
+
+    assert clean is not None
+    assert SECRET not in clean.text
+    assert "[REDACTED]" in clean.text
+    assert "text/html" in clean.representations
+
+    guard.handle(ClipboardEvent.of(PAYLOAD, representations={"text/html": f"<pre>{PAYLOAD}</pre>"}))
+    assert SECRET not in backend.writer.writes[-1]
+
+
 def test_a_fully_scanned_clean_copy_says_nothing(guard_factory) -> None:
     guard, _, _ = guard_factory(mode="redact")
     told: list[ClipboardEvent] = []

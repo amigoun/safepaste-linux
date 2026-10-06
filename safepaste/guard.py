@@ -27,7 +27,7 @@ from typing import Any, Protocol
 
 from . import config as config_mod
 from .backend import Backend, ClipboardEvent, get_backend
-from .detector import Detector, load_default, summarise, value_hash
+from .detector import Detector, Finding, load_default, summarise, value_hash
 from .redactor import Redaction, RedactionStyle, redact
 
 log = logging.getLogger(__name__)
@@ -43,6 +43,26 @@ PARTLY_CHECKED_TITLE = "Clipboard not fully checked"
 PARTLY_CHECKED_BODY = (
     "It was too large to check completely, so it may still contain a secret."
 )
+
+
+def _every_occurrence(
+    text: str, found: list[Finding], sources: dict[str, Finding]
+) -> list[Finding]:
+    """`found`, plus each verbatim occurrence in `text` of a value in `sources`
+    that none of `found` already covers."""
+    extra: list[Finding] = []
+    for value, source in sources.items():
+        start = text.find(value) if value else -1
+        while start != -1:
+            end = start + len(value)
+            if not any(f.start <= start and end <= f.end for f in found):
+                extra.append(
+                    dataclasses.replace(
+                        source, start=start, end=end, match_start=start, match_end=end
+                    )
+                )
+            start = text.find(value, start + 1)
+    return [*found, *extra] if extra else found
 
 
 class Timer(Protocol):
@@ -348,6 +368,11 @@ class Guard:
         """Redact every text-bearing representation of `event`, or None if clean,
         and whether the copy, as the user will paste it, was scanned only in part.
 
+        A value found in any representation is redacted wherever it appears
+        verbatim in every one, plain text included: each is scanned on its own,
+        and a different context or a cut-off scan can miss in one what another
+        found.
+
         A rich representation is kept only when its own scan accounts for every
         secret the plain text had and none of the values found anywhere survive
         in it: markup can split or escape a value so that scanning the source
@@ -374,19 +399,24 @@ class Guard:
             return None, incomplete
 
         in_plain = {event.text[f.start : f.end] for f in plain}
-        values = set(in_plain)
-        for value, found in scanned.values():
-            values.update(value[f.start : f.end] for f in found)
+        # Each secret value, with a finding to attribute its other occurrences to.
+        sources: dict[str, Finding] = {}
+        for text, found in [(event.text, plain), *scanned.values()]:
+            for f in found:
+                sources.setdefault(text[f.start : f.end], f)
+        values = set(sources)
 
-        plain_result = redact(event.text, plain, style)
-        reports = [(plain, plain_result)] if plain else []
+        plain_found = _every_occurrence(event.text, plain, sources)
+        plain_result = redact(event.text, plain_found, style)
+        reports = [(plain_found, plain_result)] if plain_found else []
         kept: dict[str, str] = {}
         for name, (value, found) in scanned.items():
+            whole = not getattr(found, "incomplete", False)
+            found = _every_occurrence(value, found, sources)
             result = redact(value, found, style)
             if found:
                 reports.append((found, result))
             covered = in_plain <= {value[f.start : f.end] for f in found}
-            whole = not getattr(found, "incomplete", False)
             if covered and whole and not any(v in result.text for v in values):
                 kept[name] = result.text
             else:
