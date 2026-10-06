@@ -95,6 +95,8 @@ class Guard:
         backend: Backend | None = None,
         on_detection: Callable[[list, Redaction, ClipboardEvent], None] | None = None,
         timer: Timer | None = None,
+        can_ask: bool = False,
+        can_restore: bool = True,
     ) -> None:
         self.config = config or config_mod.load()
         for warning in self.config._warnings:
@@ -104,6 +106,12 @@ class Guard:
         self.timer = timer or _NoTimer()
         # Injected by whatever front end exists; a headless guard has no presenter.
         self.on_detection = on_detection
+        # Whether the front end can put a question to the user. Without one, `ask`
+        # would leave the secret in place and ask nobody, so it runs as `redact`.
+        self.can_ask = can_ask
+        # Whether anything can offer "Restore original". Without that, holding the
+        # plaintext for the retention window is exposure with no use.
+        self.can_restore = can_restore
 
         # Set before the detector is built: building one reads the key.
         self._cached_exclusion_key: bytes | None = None
@@ -221,6 +229,12 @@ class Guard:
         )
 
     @property
+    def effective_mode(self) -> str:
+        """The mode as applied, which differs only for `ask` with nobody to ask."""
+        mode = self.config.mode
+        return "redact" if mode == "ask" and not self.can_ask else mode
+
+    @property
     def paused(self) -> bool:
         return time.monotonic() < self._paused_until
 
@@ -289,7 +303,7 @@ class Guard:
         )
         self._last_secret_hashes = clean.hashes
 
-        if self.config.mode == "redact":
+        if self.effective_mode == "redact":
             # Replace first. This is what makes ignoring the dialog safe.
             if self._write(clean.text, clean.representations, event.flavour):
                 self.hold_original(event, clean.result.labels)
@@ -410,7 +424,7 @@ class Guard:
     def hold_original(self, event: ClipboardEvent, labels: tuple[str, ...]) -> None:
         self.forget_original()
         ttl = self.config.restore_timeout_secs
-        if ttl <= 0:
+        if ttl <= 0 or not self.can_restore:
             return
         self._held = HeldOriginal(
             text=event.text,

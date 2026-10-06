@@ -576,14 +576,18 @@ def test_the_tray_menu_matches_the_linux_one() -> None:
         assert expected in labels, f"{expected!r} missing from the Windows tray menu"
 
 
-def test_exactly_one_mode_is_checked() -> None:
-    from safepaste.config import MODES
+def test_the_windows_menu_does_not_offer_ask() -> None:
+    """With no dialog to ask in, the choice would only ever redact."""
+    modes = [a["mode"] for k, _l, a in _tray().build_menu_items() if k == "mode"]
+    assert modes == ["redact", "notify", "off"]
 
+
+def test_exactly_one_mode_is_checked() -> None:
     tray = _tray()
-    for mode in MODES:
+    for mode in ("redact", "notify", "off"):
         tray.set_state(mode, False)
         modes = [a for k, _l, a in tray.build_menu_items() if k == "mode"]
-        assert len(modes) == len(MODES)
+        assert len(modes) == 3
         checked = [a for a in modes if a.get("checked")]
         assert len(checked) == 1 and checked[0]["mode"] == mode
 

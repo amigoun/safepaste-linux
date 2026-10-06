@@ -90,6 +90,10 @@ class PollingShell:
             backend=backend or get_backend(),
             on_detection=self._on_detection,
             timer=self.timer,
+            # Notifications and a menu, but no dialog: nothing here can ask, and
+            # nothing can offer the undo.
+            can_ask=False,
+            can_restore=False,
         )
         self._stop = False
         # Set while consecutive polls keep failing, so a fault that recurs on
@@ -119,17 +123,15 @@ class PollingShell:
             self._tray.set_alert(secrets)
             # And take it down again. Without this one detection leaves the tray
             # reading "1 secret removed" for the rest of the session -- a claim
-            # about the past sitting where the current state belongs. The lifetime
-            # is the restore window, which is exactly how long the event stays
-            # actionable; with retention off, long enough to read.
+            # about the past sitting where the current state belongs. There is no
+            # restore window here to tie it to, so long enough to read.
             if self._alert_handle is not None:
                 self.timer.cancel(self._alert_handle)
             self._alert_handle = self.timer.schedule(
-                self.guard.config.restore_timeout_secs or ALERT_FALLBACK_SECS,
-                self._expire_alert,
+                ALERT_FALLBACK_SECS, self._expire_alert
             )
 
-        if self.guard.config.mode == "redact":
+        if self.guard.effective_mode == "redact":
             title = f"{secrets} {noun} removed from the clipboard"
             body = f"{labels}. {result.chars_kept:,} characters kept."
         else:
@@ -175,7 +177,7 @@ class PollingShell:
         )
         if tray is not None and tray.start():
             self._tray = tray
-            tray.set_state(self.guard.config.mode, self.guard.paused)
+            self._refresh_tray()
         elif tray is not None:
             log.info("no tray icon on this session; everything else is unaffected")
 
@@ -186,13 +188,16 @@ class PollingShell:
 
     def _set_mode(self, mode: str) -> None:
         self.guard.set_mode(mode)
-        if self._tray is not None:
-            self._tray.set_state(self.guard.config.mode, self.guard.paused)
+        self._refresh_tray()
 
     def _set_paused(self, paused: bool, seconds: int) -> None:
         self.guard.set_paused(paused, seconds)
+        self._refresh_tray()
+
+    def _refresh_tray(self) -> None:
+        # The applied mode, so a configured `ask` shows as the redaction it runs as.
         if self._tray is not None:
-            self._tray.set_state(self.guard.config.mode, self.guard.paused)
+            self._tray.set_state(self.guard.effective_mode, self.guard.paused)
 
     def _show_preferences(self) -> None:
         """No settings window on these platforms yet.

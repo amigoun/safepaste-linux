@@ -541,6 +541,36 @@ def test_polling_shell_redacts_and_notifies(tmp_path, monkeypatch) -> None:
     assert SECRET not in title and SECRET not in body
 
 
+def test_polling_shell_ask_mode_swaps_first_and_holds_nothing(tmp_path, monkeypatch) -> None:
+    """There is no dialog here, so `ask` can only run as `redact`.
+
+    Leaving the secret in place while asking nobody is the outcome the fail-safe
+    default exists to prevent. And with no "Restore original" anywhere on this
+    shell, the plaintext is not kept around for one.
+    """
+    import safepaste.config as config_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    notes: list[tuple[str, str]] = []
+    shell = PollingShell(
+        config_mod.Config(mode="ask", restore_timeout_secs=60).validated(),
+        backend=DarwinBackend(pasteboard=board),
+        notify=lambda t, b: (notes.append((t, b)), True)[1],
+    )
+    shell.guard.start()
+    board.external_copy({UTI_STRING: PAYLOAD})
+    shell.guard.monitor.poll_once()
+
+    assert SECRET not in (board.stringForType_(UTI_STRING) or "")
+    assert "removed from the clipboard" in notes[0][0]
+    assert shell.guard._held is None
+
+
 def test_polling_shell_does_not_claim_removal_in_notify_mode(tmp_path, monkeypatch) -> None:
     """In notify mode the clipboard is untouched, so "removed" would be a lie."""
     import safepaste.config as config_mod
@@ -745,11 +775,16 @@ def test_the_macos_menu_matches_the_other_platforms() -> None:
     assert QUIT_LABEL in labels
 
 
-def test_exactly_one_mode_is_checked_on_macos() -> None:
-    from safepaste.config import MODES
-
+def test_the_macos_menu_does_not_offer_ask() -> None:
+    """With no dialog to ask in, the choice would only ever redact."""
     tray = _darwin_tray()
-    for mode in MODES:
+    modes = [a["mode"] for k, _l, a in tray.build_menu_items() if k == "mode"]
+    assert modes == ["redact", "notify", "off"]
+
+
+def test_exactly_one_mode_is_checked_on_macos() -> None:
+    tray = _darwin_tray()
+    for mode in ("redact", "notify", "off"):
         tray.set_state(mode, False)
         checked = [a for k, _l, a in tray.build_menu_items() if k == "mode" and a.get("checked")]
         assert len(checked) == 1 and checked[0]["mode"] == mode
@@ -863,7 +898,7 @@ def test_every_refresh_reattaches_the_menu() -> None:
     tray._refresh()
     tray.set_state("redact", False)
     tray.set_alert(2)
-    tray.set_state("ask", False)
+    tray.set_state("notify", False)
 
     assert tray._item.calls == 4, "a refresh that does not reattach is a frozen menu"
 
@@ -876,8 +911,8 @@ def test_every_refresh_reattaches_the_menu() -> None:
         for i in range(tray._item.menu_obj.numberOfItems())
         if tray._item.menu_obj.itemAtIndex_(i).state()
     ]
-    assert "Ask every time" in titles
-    assert checked == ["Ask every time"], "the tick must follow the mode"
+    assert "Notify only" in titles
+    assert checked == ["Notify only"], "the tick must follow the mode"
 
 
 @macos_only

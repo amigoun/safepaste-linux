@@ -113,12 +113,16 @@ def guard_factory(tmp_path, monkeypatch):
             for k in ("write_succeeds", "locked")
             if k in cfg_kwargs
         }
+        guard_kwargs = {
+            k: cfg_kwargs.pop(k) for k in ("can_ask", "can_restore") if k in cfg_kwargs
+        }
         backend = FakeBackend(**backend_kwargs)
         events: list[tuple] = []
         guard = Guard(
             Config(**cfg_kwargs).validated(),
             backend=backend,
             on_detection=lambda f, r, e: events.append((f, r, e)),
+            **guard_kwargs,
         )
         return guard, backend, events
 
@@ -231,6 +235,38 @@ def test_notify_mode_leaves_the_clipboard_alone(guard_factory) -> None:
 
     assert backend.writer.writes == [], "notify mode must not modify the clipboard"
     assert len(events) == 1, "but it must still report the detection"
+
+
+def test_ask_with_nobody_to_ask_runs_as_redact(guard_factory) -> None:
+    """A front end with no dialog cannot ask, so leaving the secret would be the
+    worst of both: still on the clipboard, and nobody told it needs a decision."""
+    guard, backend, events = guard_factory(mode="ask")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert backend.writer.writes and SECRET not in backend.writer.writes[-1]
+    assert guard.effective_mode == "redact"
+    assert len(events) == 1
+
+
+def test_ask_leaves_the_clipboard_to_a_front_end_that_can_ask(guard_factory) -> None:
+    guard, backend, events = guard_factory(mode="ask", can_ask=True)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert backend.writer.writes == []
+    assert guard.effective_mode == "ask"
+    assert len(events) == 1
+
+
+def test_no_plaintext_is_held_where_nothing_can_restore_it(guard_factory) -> None:
+    """Retention exists for "Restore original"; without that, it is only exposure."""
+    guard, backend, _ = guard_factory(
+        mode="redact", restore_timeout_secs=60, can_restore=False
+    )
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert SECRET not in backend.writer.writes[-1]
+    assert guard._held is None
+    assert guard.restore_original() is False
 
 
 def test_off_mode_does_nothing_at_all(guard_factory) -> None:

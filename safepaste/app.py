@@ -50,6 +50,7 @@ class SafePasteApp(Adw.Application):
             # made through the tray: a pause over D-Bus used to leave the menu
             # claiming to be guarding.
             on_state_changed=self._refresh_tray,
+            can_ask=True,
         )
         self.tray = None
         self._prefs_window = None

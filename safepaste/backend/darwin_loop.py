@@ -308,8 +308,7 @@ class Tray:
             else "Protected"
         )
         labels = {
-            "redact": "Redact automatically", "ask": "Ask every time",
-            "notify": "Notify only", "off": "Off",
+            "redact": "Redact automatically", "notify": "Notify only", "off": "Off",
         }
         items: list[tuple[str, str, dict]] = [
             ("status", status, {"enabled": False}),
@@ -318,6 +317,10 @@ class Tray:
             ("separator", "", {}),
         ]
         for mode in MODES:
+            if mode == "ask":
+                # Nothing on this platform can ask, so `ask` runs as `redact`
+                # (Guard.can_ask) and is not a choice of its own here.
+                continue
             items.append(
                 ("mode", labels[mode], {"mode": mode, "checked": mode == self._mode})
             )
