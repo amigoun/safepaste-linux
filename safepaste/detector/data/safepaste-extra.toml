@@ -169,7 +169,10 @@ keywords = ["client-key-data"]
 id = "safepaste-kubeconfig-token"
 description = "kubeconfig user token"
 category = "tokens"
-regex = '''(?i)^\s{2,}token\s*:\s*["']?([\w\-./+=]{20,})'''
+# Multiline, so `^` is any line start: without it this fired only when the
+# token was the first line of the paste, never inside a kubeconfig. Horizontal
+# whitespace only, so the indent cannot reach back across blank lines.
+regex = '''(?im)^[ \t]{2,}token[ \t]*:[ \t]*["']?([\w\-./+=]{20,})'''
 keywords = ["token"]
 entropy = 3.5
 

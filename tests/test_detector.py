@@ -338,6 +338,31 @@ def test_every_capture_of_a_repeated_secret_group_is_a_finding() -> None:
 
 
 # ---------------------------------------------------------------------------
+# kubeconfig tokens anywhere in the file
+# ---------------------------------------------------------------------------
+
+_EKS_TOKEN = (
+    "k8s-aws-v1.aHR0cHM6Ly9zdHMudXMtZWFzdC0xLmFtYXpvbmF3cy5jb20vP0FjdGlvbj1H"
+    "ZXRDYWxsZXJJZGVudGl0eSZWZXJzaW9uPTIwMTEtMDYtMTUmWC1BbXotQWxnb3JpdGhtPUFX"
+    "UzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BU0lBM1haUTdOQlZDRDRLTE0yUA"
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "apiVersion: v1\nkind: Config\nusers:\n- name: eks-admin\n  user:\n"
+        f"    token: {_EKS_TOKEN}\n",
+        f"    token: {_EKS_TOKEN}",
+    ],
+    ids=["whole-kubeconfig", "token-line-alone"],
+)
+def test_a_kubeconfig_token_is_found_on_any_line(detector: Detector, text: str) -> None:
+    found = [f for f in detector.scan(text) if f.rule_id == "safepaste-kubeconfig-token"]
+    assert [text[f.start : f.end] for f in found] == [_EKS_TOKEN]
+
+
+# ---------------------------------------------------------------------------
 # Passwords inside URLs
 # ---------------------------------------------------------------------------
 
