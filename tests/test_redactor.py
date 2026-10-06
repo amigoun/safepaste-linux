@@ -306,3 +306,20 @@ def test_redacting_twice_changes_nothing_the_second_time(detector: Detector) -> 
     assert once.changed
     assert not twice.changed
     assert twice.text == once.text
+
+
+def test_a_redacted_url_password_rescans_clean_whatever_it_contained(
+    detector: Detector,
+) -> None:
+    """`@` and `/` inside the password must all go, and the result be clean."""
+    for text, password in (
+        ("mysql://admin:Zq8v@R2kLmN4pT7w@db.internal:3306/app", "Zq8v@R2kLmN4pT7w"),
+        ("redis://:Zq8vR2kLmN4pT7wXbY9c@cache.internal:6379/0", "Zq8vR2kLmN4pT7wXbY9c"),
+        ("postgres://svc:Zq8vR2kL/N4pT7wXb+Y9c@db.internal:5432/prod", "Zq8vR2kL/N4pT7wXb+Y9c"),
+        ("mongodb://admin:P@ssw0rd!2024x@db.internal:27017/app", "P@ssw0rd!2024x"),
+    ):
+        for style in (None, FULL):
+            result = redact(text, detector.scan(text), style)
+            assert password[4:-4] not in result.text
+            assert result.text.endswith(text[text.rindex("@") :])
+            assert detector.scan(result.text) == [], f"rescan flagged {result.text!r}"

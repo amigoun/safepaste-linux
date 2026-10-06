@@ -188,6 +188,67 @@ def test_false_positive_corpus_yields_no_findings(detector: Detector, text: str)
 
 
 # ---------------------------------------------------------------------------
+# Passwords inside URLs
+# ---------------------------------------------------------------------------
+
+URL_PASSWORDS = [
+    pytest.param(
+        "mysql://admin:Zq8v@R2kLmN4pT7w@db.internal:3306/app",
+        "Zq8v@R2kLmN4pT7w",
+        id="at-sign-in-password",
+    ),
+    pytest.param(
+        "redis://:Zq8vR2kLmN4pT7wXbY9c@cache.internal:6379/0",
+        "Zq8vR2kLmN4pT7wXbY9c",
+        id="no-username",
+    ),
+    pytest.param(
+        "postgres://svc:Zq8vR2kL/N4pT7wXb+Y9c@db.internal:5432/prod",
+        "Zq8vR2kL/N4pT7wXb+Y9c",
+        id="slash-in-password",
+    ),
+    pytest.param(
+        "mongodb://admin:P@ssw0rd!2024x@db.internal:27017/app",
+        "P@ssw0rd!2024x",
+        id="at-sign-and-bang",
+    ),
+    pytest.param(
+        "https://deploy:Zq8v@R2k/LmN4pT7w@registry.example.test/v2/",
+        "Zq8v@R2k/LmN4pT7w",
+        id="generic-scheme",
+    ),
+]
+
+
+@pytest.mark.parametrize(("text", "password"), URL_PASSWORDS)
+def test_a_url_password_is_found_whole(
+    detector: Detector, text: str, password: str
+) -> None:
+    """Up to the last `@` before the host: stopping at the first one printed
+    the rest of the password as though it were the hostname."""
+    spans = {text[f.start : f.end] for f in detector.scan(text)}
+    assert spans == {password}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://user@host.example.test/path",
+        "git@github.com:org/repo.git",
+        "ssh://git@github.com:22/org/repo.git",
+        "https://example.test:8443/users/@alice",
+        "postgres://db.internal:5432/app?user=svc@corp",
+        "redis://cache.internal:6379/0",
+        "https://example.test/a:b@c",
+    ],
+)
+def test_a_url_without_a_password_is_not_flagged(
+    detector: Detector, text: str
+) -> None:
+    assert detector.scan(text) == []
+
+
+# ---------------------------------------------------------------------------
 # PEM private keys beside other PEM blocks, and cut short
 # ---------------------------------------------------------------------------
 
