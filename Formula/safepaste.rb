@@ -91,8 +91,13 @@ class Safepaste < Formula
         safepaste redact -    writes the sanitised text to stdout
         safepaste rules       lists the detectors
 
-      Per-application policy is supported on macOS, keyed by bundle identifier.
-      See the [policy] section in the README.
+      Per-application policy is supported on macOS, keyed by bundle identifier,
+      and applies to the Ctrl+Alt+V shortcut. Add a [policy] table to config.toml:
+
+        [policy]
+        "com.agilebits.onepassword7" = "off"
+
+      The README's Platforms section describes what it covers.
     EOS
   end
 
