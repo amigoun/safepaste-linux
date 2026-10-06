@@ -378,6 +378,57 @@ def test_a_backend_without_a_lock_watcher_still_works(guard_factory) -> None:
     assert SECRET not in backend.writer.writes[-1]
 
 
+class _PartialScan(list):
+    """What a detector returns when it could not scan the whole input."""
+
+    incomplete = True
+    skipped_rules: tuple[str, ...] = ()
+    truncated = True
+
+
+class _PartialDetector:
+    def scan(self, _text: str) -> _PartialScan:
+        return _PartialScan()
+
+
+def test_a_partly_scanned_clean_copy_is_reported_not_passed(guard_factory) -> None:
+    """Saying nothing would read as "checked and clean", which it was not."""
+    guard, backend, events = guard_factory(mode="redact")
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.detector = _PartialDetector()
+    guard.handle(ClipboardEvent.of("a very large paste"))
+
+    assert len(told) == 1
+    assert backend.writer.writes == [], "nothing was found, so nothing is redacted"
+    assert events == []
+
+
+def test_a_partly_scanned_representation_is_not_kept(guard_factory) -> None:
+    """Its unscanned tail could hold anything, so it cannot be shown clean."""
+    guard, _, _ = guard_factory(mode="redact")
+    real = guard.detector
+
+    class HtmlPartly:
+        def scan(self, text: str):
+            found = real.scan(text)
+            return _PartialScan(found) if text.startswith("<") else found
+
+    guard.detector = HtmlPartly()
+    html = f"<pre>{PAYLOAD}</pre>"
+    clean, _ = guard._sanitise(ClipboardEvent.of(PAYLOAD, representations={"text/html": html}))
+
+    assert clean is not None and clean.representations == {}
+
+
+def test_a_fully_scanned_clean_copy_says_nothing(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact")
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.handle(ClipboardEvent.of("an entirely ordinary sentence"))
+    assert told == []
+
+
 # --- on-demand path -------------------------------------------------------
 
 

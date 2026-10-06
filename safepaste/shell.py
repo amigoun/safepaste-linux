@@ -27,7 +27,13 @@ from typing import Any
 
 from . import config as config_mod, hardening
 from .backend import Backend, get_backend
-from .guard import NOT_REMOVED, REMOVED, Guard
+from .guard import (
+    NOT_REMOVED,
+    PARTLY_CHECKED_BODY,
+    PARTLY_CHECKED_TITLE,
+    REMOVED,
+    Guard,
+)
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +97,7 @@ class PollingShell:
             cfg,
             backend=backend or get_backend(),
             on_detection=self._on_detection,
+            on_incomplete=self._on_incomplete,
             timer=self.timer,
             # Notifications and a menu, but no dialog: nothing here can ask, and
             # nothing can offer the undo.
@@ -146,6 +153,9 @@ class PollingShell:
             title = f"{secrets} {noun} on the clipboard"
             body = labels
         self.notify(title, body)
+
+    def _on_incomplete(self, _event) -> None:
+        self.notify(PARTLY_CHECKED_TITLE, PARTLY_CHECKED_BODY)
 
     # -- lifecycle ---------------------------------------------------------
 

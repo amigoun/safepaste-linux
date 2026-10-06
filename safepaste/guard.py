@@ -38,6 +38,12 @@ REMOVED = "removed"
 NOT_REMOVED = "not-removed"  # a redaction was due and the write failed
 LEFT = "left"  # the mode leaves the clipboard alone
 
+# Shared by the front ends, so every platform says the same thing.
+PARTLY_CHECKED_TITLE = "Clipboard not fully checked"
+PARTLY_CHECKED_BODY = (
+    "It was too large to check completely, so it may still contain a secret."
+)
+
 
 class Timer(Protocol):
     """A one-shot scheduler, so this layer needs no main loop of its own."""
@@ -103,6 +109,7 @@ class Guard:
         *,
         backend: Backend | None = None,
         on_detection: Callable[[list, Redaction, ClipboardEvent], None] | None = None,
+        on_incomplete: Callable[[ClipboardEvent], None] | None = None,
         timer: Timer | None = None,
         can_ask: bool = False,
         can_restore: bool = True,
@@ -115,6 +122,9 @@ class Guard:
         self.timer = timer or _NoTimer()
         # Injected by whatever front end exists; a headless guard has no presenter.
         self.on_detection = on_detection
+        # Told when a copy found nothing but was not scanned in full, because
+        # saying nothing then reads as "checked and clean".
+        self.on_incomplete = on_incomplete
         # Whether the front end can put a question to the user. Without one, `ask`
         # would leave the secret in place and ask nobody, so it runs as `redact`.
         self.can_ask = can_ask
@@ -303,9 +313,13 @@ class Guard:
             log.debug("session locked; ignoring clipboard change")
             return
 
-        clean = self._sanitise(event)
+        clean, incomplete = self._sanitise(event)
         self._last_finding_count = len(clean.findings) if clean else 0
         if clean is None:
+            if incomplete:
+                log.warning("the clipboard was too large to check completely")
+                if self.on_incomplete is not None:
+                    self.on_incomplete(event)
             return
 
         info = summarise(clean.findings)
@@ -330,8 +344,9 @@ class Guard:
         if self.on_detection is not None:
             self.on_detection(clean.findings, clean.result, event)
 
-    def _sanitise(self, event: ClipboardEvent) -> Sanitised | None:
-        """Redact every text-bearing representation of `event`, or None if clean.
+    def _sanitise(self, event: ClipboardEvent) -> tuple[Sanitised | None, bool]:
+        """Redact every text-bearing representation of `event`, or None if clean,
+        and whether any of them was scanned only in part.
 
         A rich representation is kept only when its own scan accounts for every
         secret the plain text had and none of the values found anywhere survive
@@ -345,8 +360,10 @@ class Guard:
             name: (value, self.detector.scan(value))
             for name, value in event.representations.items()
         }
-        if not plain and not any(found for _, found in scanned.values()):
-            return None
+        scans = [plain, *(found for _, found in scanned.values())]
+        incomplete = any(getattr(found, "incomplete", False) for found in scans)
+        if not any(scans):
+            return None, incomplete
 
         in_plain = {event.text[f.start : f.end] for f in plain}
         values = set(in_plain)
@@ -361,7 +378,8 @@ class Guard:
             if found:
                 reports.append((found, result))
             covered = in_plain <= {value[f.start : f.end] for f in found}
-            if covered and not any(v in result.text for v in values):
+            whole = not getattr(found, "incomplete", False)
+            if covered and whole and not any(v in result.text for v in values):
                 kept[name] = result.text
             else:
                 log.info("dropping the %s representation; it cannot be shown clean", name)
@@ -379,7 +397,7 @@ class Guard:
             hashes=(
                 tuple(value_hash(v, key) for v in sorted(values)) if key is not None else ()
             ),
-        )
+        ), incomplete
 
     def _write(self, text: str, representations: dict[str, str], flavour: str) -> bool:
         """Replace the whole clipboard with `text` and `representations`."""
@@ -432,9 +450,12 @@ class Guard:
         event = self._read_clipboard()
         if event is None:
             return 0
-        clean = self._sanitise(event)
+        clean, incomplete = self._sanitise(event)
         if clean is None:
-            log.info("safe paste: clipboard is clean")
+            if incomplete:
+                log.warning("safe paste: the clipboard was too large to check completely")
+            else:
+                log.info("safe paste: clipboard is clean")
             return 0
         self._last_secret_hashes = clean.hashes
         if not self._write(clean.text, clean.representations, event.flavour):

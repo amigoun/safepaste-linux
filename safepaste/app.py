@@ -23,7 +23,7 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from . import config as config_mod, hardening
 from .daemon import Daemon
-from .guard import NOT_REMOVED, REMOVED
+from .guard import NOT_REMOVED, PARTLY_CHECKED_BODY, PARTLY_CHECKED_TITLE, REMOVED
 from .ui.dialog import present_detection
 
 log = logging.getLogger(__name__)
@@ -47,6 +47,9 @@ class SafePasteApp(Adw.Application):
         self.daemon = Daemon(
             self.config,
             on_detection=self._on_detection,
+            on_incomplete=lambda _event: self._notify_simple(
+                PARTLY_CHECKED_TITLE, PARTLY_CHECKED_BODY
+            ),
             # So the tray follows the daemon's state rather than only the changes
             # made through the tray: a pause over D-Bus used to leave the menu
             # claiming to be guarding.

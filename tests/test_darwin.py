@@ -664,6 +664,43 @@ def test_polling_shell_does_not_claim_a_removal_that_failed(tmp_path, monkeypatc
     assert "still holds" in body
 
 
+def test_polling_shell_says_when_a_copy_was_only_partly_checked(
+    tmp_path, monkeypatch
+) -> None:
+    import safepaste.config as config_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    class PartialScan(list):
+        incomplete = True
+        skipped_rules = ("generic-api-key",)
+        truncated = False
+
+    class PartialDetector:
+        def scan(self, _text: str) -> PartialScan:
+            return PartialScan()
+
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    notes: list[tuple[str, str]] = []
+    shell = PollingShell(
+        config_mod.Config(mode="redact").validated(),
+        backend=DarwinBackend(pasteboard=board),
+        notify=lambda t, b: (notes.append((t, b)), True)[1],
+    )
+    shell.guard.start()
+    shell.guard.detector = PartialDetector()
+    board.external_copy({UTI_STRING: "a very large paste"})
+    shell.guard.monitor.poll_once()
+
+    assert board.stringForType_(UTI_STRING) == "a very large paste"
+    assert len(notes) == 1
+    title, body = notes[0]
+    assert "not fully checked" in title and "may still contain a secret" in body
+
+
 def test_polling_shell_does_not_claim_removal_in_notify_mode(tmp_path, monkeypatch) -> None:
     """In notify mode the clipboard is untouched, so "removed" would be a lie."""
     import safepaste.config as config_mod
