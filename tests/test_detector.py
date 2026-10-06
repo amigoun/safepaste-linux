@@ -188,6 +188,35 @@ def test_false_positive_corpus_yields_no_findings(detector: Detector, text: str)
 
 
 # ---------------------------------------------------------------------------
+# Placeholders are whole words, not prefixes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "password",
+    ["Football2024", "Barcelona1992", "Testarossa88", "Enterprise2024Prod"],
+)
+def test_a_password_that_starts_like_a_placeholder_is_found(
+    detector: Detector, password: str
+) -> None:
+    text = f"DB_PASSWORD={password}"
+    assert password in [text[f.start : f.end] for f in detector.scan(text)]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "changeme", "foo", "foobar", "test", "testing", "test123", "example_key",
+        "example_key1", "your_api_key", "yourApiKey", "<enter-token-here>",
+        "enter_your_token_here", "paste-your-api-key", "dummy_password",
+        "sample-secret-value", "mock_api_key_1234", "lorem_ipsum",
+    ],
+)
+def test_a_placeholder_value_is_not_flagged(detector: Detector, value: str) -> None:
+    assert detector.scan(f"DB_PASSWORD={value}") == []
+
+
+# ---------------------------------------------------------------------------
 # UUID-shaped vendor keys: noise to the catch-all rules, the format to these
 # ---------------------------------------------------------------------------
 

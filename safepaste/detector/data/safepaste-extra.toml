@@ -22,11 +22,14 @@ regexes = [
     # Obvious placeholders. Kept anchored so they only fire on the whole secret,
     # never as a substring of a real key.
     '''(?i)^(?:changeme|change_me|placeholder|redacted|hidden|removed)$''',
-    '''(?i)^(?:your|my|the)[_-]?(?:api)?[_-]?(?:key|token|secret|password)$''',
     '''(?i)^(?:x{4,}|y{4,}|z{4,}|\*{4,}|\.{4,}|_{4,}|-{4,}|0{4,})$''',
-    '''(?i)^(?:insert|enter|add|paste)[_-]?(?:your)?[_-]?\w{0,20}$''',
-    '''(?i)^(?:test|dummy|sample|fake|mock|example)[_-]?\w{0,12}$''',
-    '''(?i)^(?:lorem|ipsum|foobar|foo|bar|baz|qux)\w{0,12}$''',
+    # Made only of placeholder words -- `test`, `foobar`, `your_api_key`,
+    # `enter-token-here`, `example_key1` -- and nothing else. A word plus any
+    # tail is not enough: as prefixes, `foo`, `bar`, `test` and `enter` excused
+    # Football2024, Barcelona1992, Testarossa88 and Enterprise2024Prod. Atomic
+    # and possessive so the split into words cannot backtrack, longest word
+    # first wherever one is a prefix of another.
+    '''(?i)^(?>testing|test|dummy|sample|fake|mock|example|lorem|ipsum|foo|bar|baz|quux|qux|insert|enter|add|paste|put|replace|your|my|the)(?:[_-]?(?>testing|test|dummy|sample|fake|mock|example|lorem|ipsum|dolor|foo|bar|baz|quux|qux|your|my|the|own|real|actual|new|here|goes|api|access|auth|secret|keys|key|token|password|passwd|pass|pwd|credentials|credential|value|string|data|user|client|app|private|public|id))*+(?:[_-]?\d{1,4})?$''',
     # Values that are plainly a reference to a secret rather than one.
     '''^\$(?:\w+|\{\w+\}|\(\w+\))$''',
     '''^(?:process\.env|os\.environ|ENV)\[?[\w'".\]]+$''',
