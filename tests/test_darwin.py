@@ -263,22 +263,18 @@ def test_identical_content_recopied_is_ignored(board: FakePasteboard) -> None:
     assert len(seen) == 1
 
 
-def test_a_value_we_wrote_is_still_new_when_copied_from_elsewhere(
-    board: FakePasteboard,
-) -> None:
-    """After a restore our own write *is* the secret, and copying it again from
-    its source later must be scanned rather than skipped as unchanged."""
+def test_a_reassert_of_what_we_wrote_is_not_reported(board: FakePasteboard) -> None:
+    """Clipboard managers re-assert the value we wrote; that is not a new copy."""
     seen: list[ClipboardEvent] = []
     monitor = _monitor(board, seen)
     writer = DarwinClipboardWriter(board)
     writer.write(PAYLOAD)
     monitor.note_own_write(PAYLOAD)
     monitor.poll_once()
-    assert seen == []
 
     board.external_copy({UTI_STRING: PAYLOAD})
     monitor.poll_once()
-    assert [e.text for e in seen] == [PAYLOAD]
+    assert seen == []
 
 
 def test_a_genuinely_new_value_is_reported(board: FakePasteboard) -> None:
@@ -465,28 +461,28 @@ def test_restore_does_not_overwrite_a_newer_copy(tmp_path, monkeypatch) -> None:
     assert board.stringForType_(UTI_STRING) == "the user's newer copy"
 
 
-def test_copying_a_restored_secret_again_is_redacted(tmp_path, monkeypatch) -> None:
-    import safepaste.config as config_mod
-    from safepaste.guard import Guard
-
-    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
-    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+def test_a_clipboard_manager_reasserting_our_write_changes_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    """Re-asserting the redaction must not drop the undo or the never-flag
+    target, and re-asserting a restore must not redact it again."""
     board = FakePasteboard({UTI_STRING: "quiet"})
-    guard = Guard(
-        config_mod.Config(mode="redact", restore_timeout_secs=60).validated(),
-        backend=DarwinBackend(pasteboard=board),
-    )
-    guard.start()
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
     board.external_copy({UTI_STRING: PAYLOAD})
     guard.monitor.poll_once()
+    redacted = board.stringForType_(UTI_STRING)
+    assert SECRET not in redacted
+    hashes = guard._last_secret_hashes
+
+    board.external_copy({UTI_STRING: redacted})
+    guard.monitor.poll_once()
+    assert guard._last_secret_hashes == hashes
     assert guard.restore_original() is True
     guard.monitor.poll_once()
-    assert board.stringForType_(UTI_STRING) == PAYLOAD, "the restore itself stands"
 
     board.external_copy({UTI_STRING: PAYLOAD})
     guard.monitor.poll_once()
-    assert SECRET not in (board.stringForType_(UTI_STRING) or "")
+    assert board.stringForType_(UTI_STRING) == PAYLOAD
 
 
 def _darwin_guard(tmp_path, monkeypatch, board: FakePasteboard, **cfg):

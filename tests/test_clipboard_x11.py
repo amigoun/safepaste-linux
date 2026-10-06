@@ -379,8 +379,8 @@ def test_a_raising_handler_does_not_remove_the_monitor_watch():
     assert monitor._on_fd_ready(0, None, None) is True
 
 
-def test_a_value_we_wrote_is_still_new_when_copied_from_elsewhere():
-    """After a restore our own write is the secret; a later copy of it is new."""
+def test_a_reassert_of_what_we_wrote_is_not_reported():
+    """Clipboard managers re-assert the value we wrote; that is not a new copy."""
     from safepaste.backend import ClipboardEvent
     from safepaste.clipboard.monitor import XFixesMonitor
 
@@ -392,7 +392,6 @@ def test_a_value_we_wrote_is_still_new_when_copied_from_elsewhere():
     monitor = XFixesMonitor(on_change=seen.append, reader=_Reader())
     monitor.note_own_write(PAYLOAD)
     monitor._handle_change()
+    monitor._handle_change()
     assert seen == []
 
-    monitor._handle_change()
-    assert [e.text for e in seen] == [PAYLOAD]
