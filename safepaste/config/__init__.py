@@ -155,8 +155,13 @@ class Config:
             self.mode = "redact"
         unknown = [c for c in self.categories if c not in CATEGORIES]
         if unknown:
+            # Only consulted when needed: reading rule files on every load would
+            # cost the common case for the sake of a rare one.
+            custom = self.custom_categories()
+            unknown = [c for c in unknown if c not in custom]
+        if unknown:
             self._warnings.append(f"ignoring unknown categories: {', '.join(unknown)}")
-            self.categories = tuple(c for c in self.categories if c in CATEGORIES)
+            self.categories = tuple(c for c in self.categories if c not in unknown)
         if self.restore_timeout_secs < 0:
             self._warnings.append("restore_timeout_secs cannot be negative, using 60")
             self.restore_timeout_secs = 60
@@ -224,6 +229,27 @@ class Config:
             if app.lower() == wanted:
                 return mode
         return self.mode
+
+    def custom_categories(self) -> frozenset[str]:
+        """Categories named by rules in the user's extra rule files.
+
+        A rule may carry any category, so one the user invents is as valid to
+        enable as a built-in one. Read with tomllib rather than the rule loader,
+        which would compile every regex just to learn a label; a file that does
+        not parse is skipped here and reported when the rules are loaded.
+        """
+        found: set[str] = set()
+        for path in self.extra_rule_paths():
+            try:
+                doc = tomllib.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                continue
+            rules = doc.get("rules")
+            for rule in rules if isinstance(rules, list) else ():
+                category = rule.get("category") if isinstance(rule, dict) else None
+                if isinstance(category, str):
+                    found.add(category)
+        return frozenset(found)
 
     def extra_rule_paths(self) -> list[pathlib.Path]:
         found: list[pathlib.Path] = []

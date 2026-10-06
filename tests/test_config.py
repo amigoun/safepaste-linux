@@ -192,3 +192,40 @@ def test_an_unusable_rule_glob_is_skipped_not_fatal(config_dir, pattern: str) ->
         config_dir, f'[detection]\nextra_rule_globs = ["{pattern}", "rules/*.toml"]\n'
     )
     assert cfg.extra_rule_paths() == []
+
+
+# ---------------------------------------------------------------------------
+# categories from custom rules
+# ---------------------------------------------------------------------------
+
+CUSTOM_CATEGORY_RULE = RULE_FILE + 'category = "internal"\n'
+ACME_KEY = "acme_" + "q7w2e9r4t6y1u3i8o5p0a2s4"
+
+
+def test_a_category_from_a_custom_rule_can_be_enabled(config_dir) -> None:
+    (config_dir / "rules").mkdir()
+    (config_dir / "rules" / "acme.toml").write_text(CUSTOM_CATEGORY_RULE)
+    cfg = _load(config_dir, '[protection]\ncategories = ["tokens", "internal"]\n')
+
+    assert cfg.categories == ("tokens", "internal")
+    assert cfg._warnings == []
+    detector = Detector(
+        load_default(cfg.extra_rule_paths()), categories=cfg.category_set
+    )
+    assert [f.rule_id for f in detector.scan(f"key {ACME_KEY}")] == ["acme-key"]
+
+
+def test_a_misspelt_category_is_still_dropped_with_a_warning(config_dir) -> None:
+    (config_dir / "rules").mkdir()
+    (config_dir / "rules" / "acme.toml").write_text(CUSTOM_CATEGORY_RULE)
+    cfg = _load(config_dir, '[protection]\ncategories = ["tokens", "internl"]\n')
+
+    assert cfg.categories == ("tokens",)
+    assert any("internl" in w for w in cfg._warnings)
+
+
+def test_an_unparseable_rule_file_names_no_categories(config_dir) -> None:
+    (config_dir / "rules").mkdir()
+    (config_dir / "rules" / "broken.toml").write_bytes(b"[[rules]\n\xff")
+    cfg = _load(config_dir, '[protection]\ncategories = ["tokens", "internal"]\n')
+    assert cfg.categories == ("tokens",)
