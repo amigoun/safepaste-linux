@@ -27,12 +27,16 @@ PAYLOAD = f"notes\nGITHUB_TOKEN={SECRET}\nmore notes\n"
 
 
 class FakeWriter:
-    def __init__(self, succeed: bool = True) -> None:
+    def __init__(self, succeed: bool = True, reader: FakeReader | None = None) -> None:
         self.succeed = succeed
         self.writes: list[str] = []
+        # Where a successful write becomes visible, as on a real clipboard.
+        self.reader = reader
 
     def write(self, text: str) -> bool:
         self.writes.append(text)
+        if self.succeed and self.reader is not None:
+            self.reader.event = ClipboardEvent.of(text)
         return self.succeed
 
     def clear(self) -> bool:
@@ -82,8 +86,8 @@ class FakeBackend(Backend):
     name = "fake"
 
     def __init__(self, *, write_succeeds: bool = True, locked: bool = False) -> None:
-        self.writer = FakeWriter(write_succeeds)
         self.reader = FakeReader()
+        self.writer = FakeWriter(write_succeeds, self.reader)
         self.monitor: FakeMonitor | None = None
         self.locks = FakeLocks(locked)
 
@@ -211,6 +215,38 @@ def test_the_original_can_only_be_restored_once(guard_factory) -> None:
     guard.handle(ClipboardEvent.of(PAYLOAD))
     assert guard.restore_original() is True
     assert guard.restore_original() is False
+
+
+def test_restore_does_not_overwrite_a_newer_value(guard_factory) -> None:
+    """Paused, the guard never sees the next copy; the clipboard still says so."""
+    guard, backend, _ = guard_factory(mode="redact", restore_timeout_secs=60)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    backend.reader.event = ClipboardEvent.of("something copied since")
+    writes = len(backend.writer.writes)
+
+    assert guard.restore_original() is False
+    assert len(backend.writer.writes) == writes, "the newer value must survive"
+    assert guard._held is None, "and the secret is not kept for a later attempt"
+
+
+def test_a_new_copy_drops_the_held_original(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact", restore_timeout_secs=60)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert guard._held is not None
+
+    guard.handle(ClipboardEvent.of("an unrelated, clean copy"))
+    assert guard._held is None
+
+
+def test_a_failed_restore_does_not_excuse_the_secret(guard_factory) -> None:
+    """The monitor skips values announced as our own, so announcing the secret
+    before a write that then failed would let the next copy of it through."""
+    guard, backend, _ = guard_factory(mode="redact", restore_timeout_secs=60)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    backend.writer.succeed = False
+
+    assert guard.restore_original() is False
+    assert PAYLOAD not in backend.monitor.own_writes
 
 
 def test_zero_retention_means_no_undo_at_all(guard_factory) -> None:

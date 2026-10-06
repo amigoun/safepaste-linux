@@ -156,7 +156,7 @@ class ClipboardMonitor(Protocol):
     def note_own_write(
         self, text: str, representations: Mapping[str, str] | None = None
     ) -> None:
-        """Declare a value we are about to place, so its echo is ignored.
+        """Declare a value we have just placed, so its echo is ignored.
 
         `representations` is passed only by a caller that wrote some, and only
         to a backend whose events carry them.

@@ -333,7 +333,9 @@ class XFixesMonitor:
             return
         if self.own_writes.claim(event.digest):
             log.debug("ignoring our own clipboard write")
-            self._last_digest = event.digest
+            # Not kept as the last value seen: a later copy of the same text from
+            # elsewhere is a new copy, and after a restore that text is a secret.
+            self._last_digest = None
             return
         if event.digest == self._last_digest:
             # Some applications reassert ownership of unchanged content.

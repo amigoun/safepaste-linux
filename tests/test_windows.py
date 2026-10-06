@@ -268,6 +268,22 @@ def test_our_own_write_is_not_reported_back(api: FakeWin32Clipboard) -> None:
     assert seen == []
 
 
+def test_a_value_we_wrote_is_still_new_when_copied_from_elsewhere(
+    api: FakeWin32Clipboard,
+) -> None:
+    """After a restore our own write is the secret; a later copy of it is new."""
+    seen: list[ClipboardEvent] = []
+    monitor = _monitor(api, seen)
+    WindowsClipboardWriter(api, _nosleep).write(PAYLOAD)
+    monitor.note_own_write(PAYLOAD)
+    monitor.poll_once()
+    assert seen == []
+
+    api.external_copy(PAYLOAD)
+    monitor.poll_once()
+    assert [e.text for e in seen] == [PAYLOAD]
+
+
 def test_identical_content_recopied_is_ignored(api: FakeWin32Clipboard) -> None:
     seen: list[ClipboardEvent] = []
     monitor = _monitor(api, seen)

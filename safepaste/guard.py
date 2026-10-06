@@ -72,6 +72,9 @@ class HeldOriginal:
     labels: tuple[str, ...]
     flavour: str = ""
     representations: dict[str, str] = field(default_factory=dict)
+    # The digest of what replaced it, as the reader sees it. Restoring over
+    # anything else would destroy a newer copy.
+    replaced_by: str | None = None
 
     @property
     def alive(self) -> bool:
@@ -287,6 +290,9 @@ class Guard:
 
     def handle(self, event: ClipboardEvent) -> None:
         """React to a new clipboard value. Called by the monitor."""
+        # Whatever is held for an undo belongs to a value that has now been
+        # replaced; restoring it would overwrite what was just copied.
+        self.forget_original()
         if self.config.mode == "off" or self.paused:
             return
         if self.locked:
@@ -376,17 +382,24 @@ class Guard:
 
     def _write(self, text: str, representations: dict[str, str], flavour: str) -> bool:
         """Replace the whole clipboard with `text` and `representations`."""
+        # Announced only once it has landed, so a failed restore cannot leave the
+        # secret excused from the next scan. The monitor runs on this same loop,
+        # so it cannot observe the change in between.
         write_flavours = getattr(self.writer, "write_flavours", None)
         if representations and flavour and callable(write_flavours):
             # Plain first: it is the one the writer's verdict rests on.
             by_flavour = {flavour: text} if text else {}
             by_flavour.update(representations)
+            if not write_flavours(by_flavour):
+                return False
             self.monitor.note_own_write(text, representations)
-            return bool(write_flavours(by_flavour))
+            return True
         # A plain write replaces every representation, so a writer with no other
         # to offer drops the rich ones, and any secret in them, with the rest.
+        if not self.writer.write(text):
+            return False
         self.monitor.note_own_write(text)
-        return self.writer.write(text)
+        return True
 
     def target_mode(self) -> tuple[str, str | None]:
         """The mode to apply to a paste happening now, and the target's identity.
@@ -436,6 +449,9 @@ class Guard:
         ttl = self.config.restore_timeout_secs
         if ttl <= 0 or not self.can_restore:
             return
+        # Read back rather than computed: a backend may rewrite a representation
+        # on its way to the clipboard.
+        written = self._read_clipboard()
         self._held = HeldOriginal(
             text=event.text,
             digest=event.digest,
@@ -443,6 +459,7 @@ class Guard:
             labels=labels,
             flavour=event.flavour,
             representations=dict(event.representations),
+            replaced_by=written.digest if written is not None else None,
         )
         self._held_handle = self.timer.schedule(ttl, self._on_hold_expired)
 
@@ -468,6 +485,11 @@ class Guard:
             log.info("no original available to restore")
             return False
         held = self._held
+        current = self._read_clipboard()
+        if current is None or current.digest != held.replaced_by:
+            log.info("the clipboard has changed since the redaction; not restoring over it")
+            self.forget_original()
+            return False
         if not self._write(held.text, held.representations, held.flavour):
             return False
         log.info("restored the original clipboard value")
