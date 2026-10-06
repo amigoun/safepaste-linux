@@ -57,6 +57,7 @@ def main() -> int:
     from safepaste.backend import ClipboardEvent
     from safepaste.backend.darwin import (
         UTI_HTML,
+        UTI_RTF,
         UTI_STRING,
         DarwinBackend,
         DarwinClipboardReader,
@@ -179,6 +180,70 @@ def main() -> int:
         )
         guard.stop()
 
+        # --- rich representations -------------------------------------------
+        # A link's label can be clean while its URL carries the token, and HTML
+        # alone gets no plain text synthesised for it. Both must be scanned, and
+        # what survives a redaction must still render the placeholder as written.
+        from AppKit import NSAttributedString
+
+        def leaks() -> list[str]:
+            return [
+                str(t) for t in (board.types() or [])
+                if SECRET in (board.stringForType_(t) or "")
+            ]
+
+        def rendered(uti: str) -> str:
+            data = board.dataForType_(uti)
+            if data is None:
+                return ""
+            init = (
+                NSAttributedString.alloc().initWithHTML_documentAttributes_
+                if uti == UTI_HTML
+                else NSAttributedString.alloc().initWithRTF_documentAttributes_
+            )
+            text, _attributes = init(data, None)
+            return str(text.string()) if text is not None else ""
+
+        guard = Guard(
+            config_mod.Config(mode="redact", restore_timeout_secs=120).validated(),
+            backend=backend,
+        )
+        guard.start()
+        html = f'<a href="https://ci.example/api?token={SECRET}">Download report</a>'
+        writer.write_flavours({UTI_STRING: "Download report", UTI_HTML: html})
+        guard.monitor.poll_once()
+        check(
+            "a secret only in the HTML is gone from every representation",
+            leaks() == [],
+            f"{len(board.types() or [])} representations",
+        )
+        check(
+            "the link itself survives as HTML",
+            "[REDACTED]" in (board.stringForType_(UTI_HTML) or "")
+            and rendered(UTI_HTML) == "Download report",
+        )
+        check("restore brings the HTML back", guard.restore_original() is True
+              and board.stringForType_(UTI_HTML) == html)
+
+        writer.write_flavours({UTI_HTML: f"<p>GITHUB_TOKEN={SECRET}</p>"})
+        guard.monitor.poll_once()
+        check("an HTML-only copy is scanned", leaks() == [])
+        check(
+            "the placeholder renders from HTML without mojibake",
+            "\u2026[REDACTED]\u2026" in rendered(UTI_HTML),
+            f"{len(rendered(UTI_HTML))} chars rendered",
+        )
+
+        writer.write_flavours({UTI_RTF: "{\\rtf1\\ansi GITHUB_TOKEN=" + SECRET + "}"})
+        guard.monitor.poll_once()
+        check("an RTF copy is scanned", leaks() == [])
+        check(
+            "the placeholder renders from RTF without mojibake",
+            "\u2026[REDACTED]\u2026" in rendered(UTI_RTF),
+            f"{len(rendered(UTI_RTF))} chars rendered",
+        )
+        guard.stop()
+
         # --- the run loop and what it unlocks --------------------------------
         # Unreachable off a Mac, so this is the part the job exists for.
         loop = backend.run_loop()
@@ -235,7 +300,10 @@ def main() -> int:
             f"Accessibility granted: {trusted} (False is expected on a CI runner)",
         )
     finally:
-        if original is not None:
+        if original is not None and original.representations:
+            plain = {UTI_STRING: original.text} if original.text else {}
+            writer.write_flavours({**plain, **original.representations})
+        elif original is not None:
             writer.write(original.text)
         else:
             writer.clear()
