@@ -121,6 +121,44 @@ def test_the_warning_does_not_repeat_the_value(config_dir) -> None:
 
 
 # ---------------------------------------------------------------------------
+# keys that mean nothing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, mentions",
+    [
+        ('[protecton]\nmode = "off"\n', "[protecton]"),
+        ('mode = "off"\n', "[protection]"),
+        ('colour = "blue"\n', "colour"),
+        ('protection = "off"\n', "[protection]"),
+        ('[protection]\nplaceholder = "x"\n', "[redaction]"),
+        ('[detection]\nmax_bytes = 4096\n', "[detection].max_bytes"),
+    ],
+    ids=[
+        "misspelt-section",
+        "top-level-key",
+        "unknown-top-level",
+        "section-as-value",
+        "key-in-wrong-section",
+        "unknown-key",
+    ],
+)
+def test_a_setting_that_will_be_ignored_says_so(
+    config_dir, text: str, mentions: str
+) -> None:
+    cfg = _load(config_dir, text)
+    assert cfg.mode == "redact"
+    assert any(mentions in w for w in cfg._warnings), cfg._warnings
+
+
+def test_a_clean_config_raises_no_warnings(config_dir) -> None:
+    path = config_dir / "config.toml"
+    config_mod.save(config_mod.Config(app_modes=(("code.exe", "ask"),)), path)
+    assert config_mod.load(path)._warnings == []
+
+
+# ---------------------------------------------------------------------------
 # extra_rule_globs
 # ---------------------------------------------------------------------------
 

@@ -114,6 +114,15 @@ def test_a_hand_written_policy_section_is_read() -> None:
     assert cfg.app_mode("code.exe") == "notify"
 
 
+def test_an_unquoted_bundle_identifier_is_read_whole() -> None:
+    """Unquoted, the dots make TOML read nested tables; the identity survives."""
+    path = pathlib.Path(tempfile.mkdtemp()) / "config.toml"
+    path.write_text('[policy]\ncom.agilebits.onepassword7 = "off"\n')
+    cfg = config_mod.load(path)
+    assert cfg.app_modes == (("com.agilebits.onepassword7", "off"),)
+    assert cfg.app_mode("com.agilebits.onepassword7") == "off"
+
+
 # --- behaviour through Guard ----------------------------------------------
 
 

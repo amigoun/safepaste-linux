@@ -309,22 +309,39 @@ def load(path: pathlib.Path | None = None) -> Config:
         return cfg
 
     known = {f.name for f in fields(Config) if not f.name.startswith("_")}
+    home = {key: section for section, keys in _SECTIONS.items() for key in keys}
     values: dict[str, object] = {}
-    # A value of the wrong type keeps that key's default rather than reaching
-    # validated(), which compares and iterates on the assumption it is right.
-    wrong_type: list[str] = []
+    # Everything skipped is reported through _warnings, because a typo that
+    # silently does nothing reads to the user as a setting that took effect.
+    ignored: list[str] = []
+    for name, block in doc.items():
+        if name in _SECTIONS or name == POLICY_SECTION:
+            if not isinstance(block, dict):
+                ignored.append(f"ignoring {name}: it must be a [{name}] section")
+        elif name in home:
+            ignored.append(
+                f"ignoring top-level key {name}: it belongs under [{home[name]}]"
+            )
+        elif isinstance(block, dict):
+            ignored.append(f"ignoring unknown section [{name}]")
+        else:
+            ignored.append(f"ignoring unknown top-level key {name}")
+
     for section, keys in _SECTIONS.items():
         block = doc.get(section) or {}
         if not isinstance(block, dict):
             continue
         for key, value in block.items():
             if key not in known or key not in keys:
-                log.warning("ignoring unknown config key [%s].%s", section, key)
+                where = f", it belongs under [{home[key]}]" if key in home else ""
+                ignored.append(f"ignoring unknown key [{section}].{key}{where}")
                 continue
+            # A value of the wrong type keeps that key's default rather than
+            # reaching validated(), which assumes the type is right.
             default = getattr(_DEFAULTS, key)
             typed = _typed(value, default)
             if typed is _WRONG_TYPE:
-                wrong_type.append(
+                ignored.append(
                     f"ignoring [{section}].{key}: it should be "
                     f"{_TOML_TYPE_NAMES[type(default)]}, so the default applies"
                 )
@@ -334,12 +351,29 @@ def load(path: pathlib.Path | None = None) -> Config:
     policy = doc.get(POLICY_SECTION) or {}
     if isinstance(policy, dict):
         values["app_modes"] = tuple(
-            (str(app), str(mode)) for app, mode in policy.items()
+            (app, str(mode)) for app, mode in _dotted(policy)
         )
 
     cfg = Config(**values)  # type: ignore[arg-type]
-    cfg._warnings.extend(wrong_type)
+    cfg._warnings.extend(ignored)
     return cfg.validated()
+
+
+def _dotted(table: dict, prefix: str = "") -> list[tuple[str, object]]:
+    """A [policy] table as (identity, mode) pairs, with nested tables re-joined.
+
+    A bundle identifier written unquoted -- `com.agilebits.onepassword7 = "off"`
+    -- is a dotted key to TOML and arrives as nested tables. Joining the path
+    back up recovers the identifier the user typed.
+    """
+    pairs: list[tuple[str, object]] = []
+    for key, value in table.items():
+        name = f"{prefix}{key}"
+        if isinstance(value, dict):
+            pairs.extend(_dotted(value, f"{name}."))
+        else:
+            pairs.append((name, value))
+    return pairs
 
 
 def save(cfg: Config, path: pathlib.Path | None = None) -> None:
