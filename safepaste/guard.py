@@ -290,9 +290,10 @@ class Guard:
 
     def handle(self, event: ClipboardEvent) -> None:
         """React to a new clipboard value. Called by the monitor."""
-        # Whatever is held for an undo belongs to a value that has now been
-        # replaced; restoring it would overwrite what was just copied.
+        # Whatever is held for an undo, and whatever "never flag this again"
+        # would exclude, belong to a value that has now been replaced.
         self.forget_original()
+        self._last_secret_hashes = ()
         if self.config.mode == "off" or self.paused:
             return
         if self.locked:
@@ -435,6 +436,7 @@ class Guard:
         if clean is None:
             log.info("safe paste: clipboard is clean")
             return 0
+        self._last_secret_hashes = clean.hashes
         if not self._write(clean.text, clean.representations, event.flavour):
             return 0
         self.hold_original(event, clean.result.labels)

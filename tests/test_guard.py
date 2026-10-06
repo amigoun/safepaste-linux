@@ -422,6 +422,30 @@ def test_excluding_the_last_value_stops_it_being_flagged(guard_factory) -> None:
     assert len(backend.writer.writes) == before, "the excluded value must be ignored now"
 
 
+OTHER_SECRET = "ghp_Z9yX8wV7uT6sR5qP4oN3mL2kJ1iH0gF9eD8c"
+
+
+def test_excluding_after_a_safe_paste_excludes_what_it_redacted(guard_factory) -> None:
+    """The most recent detection is the safe paste's, not the copy before it."""
+    guard, backend, _ = guard_factory(mode="redact")
+    guard.handle(ClipboardEvent.of(f"TOKEN={OTHER_SECRET}"))
+    backend.reader.event = ClipboardEvent.of(PAYLOAD)
+    assert guard.safe_paste() == 1
+
+    assert guard.exclude_last_value() is True
+    assert guard.detector.scan(PAYLOAD) == []
+    assert guard.detector.scan(f"TOKEN={OTHER_SECRET}"), "the older value is not excluded"
+
+
+def test_a_newer_copy_leaves_nothing_to_exclude(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    guard.handle(ClipboardEvent.of("an unrelated, clean copy"))
+
+    assert guard.exclude_last_value() is False
+    assert guard.detector.scan(PAYLOAD)
+
+
 def test_exclusions_store_digests_never_plaintext(guard_factory) -> None:
     guard, _, _ = guard_factory(mode="redact")
     guard.handle(ClipboardEvent.of(PAYLOAD))
