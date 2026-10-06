@@ -24,12 +24,15 @@ regexes = [
     '''(?i)^(?:changeme|change_me|placeholder|redacted|hidden|removed)$''',
     '''(?i)^(?:x{4,}|y{4,}|z{4,}|\*{4,}|\.{4,}|_{4,}|-{4,}|0{4,})$''',
     # Made only of placeholder words -- `test`, `foobar`, `your_api_key`,
-    # `enter-token-here`, `example_key1` -- and nothing else. A word plus any
-    # tail is not enough: as prefixes, `foo`, `bar`, `test` and `enter` excused
-    # Football2024, Barcelona1992, Testarossa88 and Enterprise2024Prod. Atomic
-    # and possessive so the split into words cannot backtrack, longest word
-    # first wherever one is a prefix of another.
-    '''(?i)^(?>testing|test|dummy|sample|fake|mock|example|lorem|ipsum|foo|bar|baz|quux|qux|insert|enter|add|paste|put|replace|your|my|the)(?:[_-]?(?>testing|test|dummy|sample|fake|mock|example|lorem|ipsum|dolor|foo|bar|baz|quux|qux|your|my|the|own|real|actual|new|here|goes|api|access|auth|secret|keys|key|token|password|passwd|pass|pwd|credentials|credential|value|string|data|user|client|app|private|public|id))*+(?:[_-]?\d{1,4})?$''',
+    # `enter-token-here` -- and nothing else, led by a word that marks a
+    # placeholder. `my`, `the` and a trailing number are how real weak passwords
+    # are built (MyPassword123, mysecret2024), so they lead nothing and end
+    # nothing; `test` and `mock` lead only as whole words, for Testarossa and
+    # testkey. A word plus any tail is not enough either: as prefixes, `foo`,
+    # `bar` and `enter` excused Football2024, Barcelona1992 and
+    # Enterprise2024Prod. Atomic and possessive so the split into words cannot
+    # backtrack, longest word first wherever one is a prefix of another.
+    '''(?i)^(?>your|examples?|sample|dummy|fake|placeholder|change[_-]?me|enter|insert|paste|add|replace|x{3,}|foobar|foo|bar|baz|quux|qux|lorem|ipsum|testing|(?:test|mock)(?![a-z0-9]))(?:[_-]?(?>testing|test|dummy|sample|fake|mock|example|lorem|ipsum|dolor|foo|bar|baz|quux|qux|your|my|the|own|real|actual|new|here|goes|api|access|auth|secret|keys|key|token|password|passwd|pass|pwd|credentials|credential|value|string|data|user|client|app|private|public|id))*+$''',
     # Values that are plainly a reference to a secret rather than one.
     '''^\$(?:\w+|\{\w+\}|\(\w+\))$''',
     '''^(?:process\.env|os\.environ|ENV)\[?[\w'".\]]+$''',

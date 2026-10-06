@@ -260,14 +260,36 @@ def test_a_password_that_starts_like_a_placeholder_is_found(
 @pytest.mark.parametrize(
     "value",
     [
-        "changeme", "foo", "foobar", "test", "testing", "test123", "example_key",
-        "example_key1", "your_api_key", "yourApiKey", "<enter-token-here>",
+        "changeme", "foo", "foobar", "test", "testing", "example_key",
+        "your_api_key", "yourApiKey", "<enter-token-here>",
         "enter_your_token_here", "paste-your-api-key", "dummy_password",
-        "sample-secret-value", "mock_api_key_1234", "lorem_ipsum",
+        "sample-secret-value", "mock_api_key", "test_token", "lorem_ipsum",
+        "placeholder_token", "xxx_api_key",
     ],
 )
 def test_a_placeholder_value_is_not_flagged(detector: Detector, value: str) -> None:
     assert detector.scan(f"DB_PASSWORD={value}") == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password = MyPassword123",
+        "DB_PASSWORD=mysecret2024",
+        "password: TheToken99",
+        "DB_PASSWORD=test123",
+        "DB_PASSWORD=example_key1",
+        "DB_PASSWORD=testkey",
+        "DB_PASSWORD=mockingbird",
+    ],
+)
+def test_a_weak_password_made_of_ordinary_words_is_found(
+    detector: Detector, text: str
+) -> None:
+    """`my`, `the` and a number are how real weak passwords are made, not how
+    placeholders are marked."""
+    value = text.split("=", 1)[-1].split(":", 1)[-1].strip()
+    assert value in [text[f.start : f.end] for f in detector.scan(text)]
 
 
 # ---------------------------------------------------------------------------
