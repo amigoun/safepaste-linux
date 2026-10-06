@@ -903,6 +903,47 @@ def test_a_match_longer_than_a_window_is_not_cut_at_the_window_edge(
     assert [(f.start, f.end) for f in found] == [(7, 7 + len(blob))]
 
 
+def _end_anchored_rule(pattern=None) -> Rule:
+    return Rule(
+        id="test-end-anchored",
+        description="a value that must run to the end of the text",
+        pattern=pattern or regex.compile(r"key=([a-z]+)$"),
+        keywords=(),
+        category="api_keys",
+    )
+
+
+def test_a_match_that_only_the_window_edge_allowed_is_dropped() -> None:
+    """`$` at a window's end is the end of the text to the regex; the text
+    itself goes on, and the match does not hold there."""
+    text = "key=" + "a" * 100_000 + "!"
+
+    found = Detector(ruleset=RuleSet(rules=[_end_anchored_rule()])).scan(text)
+
+    assert found == []
+    assert not found.incomplete
+
+
+def test_a_rematch_that_times_out_skips_the_rule_rather_than_keep_the_cut() -> None:
+    real = regex.compile(r"key=([a-z]+)$")
+
+    class RematchTimesOut:
+        groups = real.groups
+
+        def finditer(self, *args, **kwargs):
+            return real.finditer(*args, **kwargs)
+
+        def match(self, *args, **kwargs):
+            raise TimeoutError("regex timed out")
+
+    text = "key=" + "a" * 100_000 + "!"
+
+    found = Detector(ruleset=RuleSet(rules=[_end_anchored_rule(RematchTimesOut())])).scan(text)
+
+    assert found == []
+    assert found.skipped_rules == ("test-end-anchored",)
+
+
 def test_scan_result_is_a_list_that_says_whether_it_is_complete(
     detector: Detector,
 ) -> None:

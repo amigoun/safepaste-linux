@@ -321,13 +321,15 @@ class Detector:
                             # Running into the window's end may have cut it
                             # short -- a base64 blob longer than a window --
                             # so it is matched again against the rest of the
-                            # text, from the same start.
-                            m = (
-                                rule.pattern.match(
-                                    text, m.start(), timeout=self.regex_timeout
-                                )
-                                or m
+                            # text, from the same start. No match there means
+                            # only the edge, read as the end of the text by
+                            # `$` or `\b`, made this one; and a timeout here
+                            # skips the rule like any other.
+                            m = rule.pattern.match(
+                                text, m.start(), timeout=self.regex_timeout
                             )
+                            if m is None:
+                                continue
                         matches.append(m)
             except TimeoutError:
                 # A pathological input made this rule superlinear. Drop it for
