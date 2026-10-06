@@ -915,6 +915,21 @@ def test_high_entropy_rule_activates_when_category_is_requested(
     assert any(f.rule_id == "safepaste-high-entropy-string" for f in findings)
 
 
+@pytest.mark.parametrize("length", [129, 200, 600])
+def test_high_entropy_rule_takes_a_run_longer_than_128_whole(
+    ruleset: RuleSet, length: int
+) -> None:
+    rng = random.Random(length)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    run = "".join(rng.choice(alphabet) for _ in range(length))
+    text = f"blob: {run} end"
+    d = Detector(ruleset=ruleset, categories=frozenset({"high_entropy"}))
+
+    found = [f for f in d.scan(text) if f.rule_id == "safepaste-high-entropy-string"]
+
+    assert [text[f.start : f.end] for f in found] == [run]
+
+
 # ---------------------------------------------------------------------------
 # merge_spans()
 # ---------------------------------------------------------------------------

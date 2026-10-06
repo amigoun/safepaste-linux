@@ -286,13 +286,17 @@ id = "safepaste-high-entropy-string"
 description = "High entropy string"
 category = "high_entropy"
 default_off = true
-regex = '''\b([A-Za-z0-9+/_\-]{32,128}={0,2})\b'''
+# Bounded by the class itself rather than `\b` and a maximum length: with
+# `{32,128}\b`, a run longer than 128 characters had no boundary where the
+# match could end, so the longest tokens -- the likeliest to be key material --
+# matched nothing at all.
+regex = '''(?<![A-Za-z0-9+/_\-])([A-Za-z0-9+/_\-]{32,}+={0,2})(?![A-Za-z0-9+/_\-])'''
 keywords = []
 entropy = 4.5
   [[rules.allowlists]]
   regexes = [
       # Hex-only runs are usually digests, not credentials.
-      '''(?i)^[0-9a-f]{32,128}$''',
+      '''(?i)^[0-9a-f]{32,}$''',
       # Base64 of something structured, e.g. an embedded PNG.
       '''^(?:iVBOR|R0lGOD|/9j/|JVBERi0)''',
   ]
