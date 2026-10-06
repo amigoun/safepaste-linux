@@ -433,9 +433,11 @@ def _parse_rule(raw: dict[str, Any], where: str) -> Rule | None:
     ):
         raise MalformedEntry("secretGroup must be a non-negative integer")
     category = raw.get("category")
-    if category is not None and category not in CATEGORIES:
+    # A custom category name is legitimate (config can enable it); only a value
+    # that cannot name a category at all falls back to classification.
+    if category is not None and not (isinstance(category, str) and category.strip()):
         log.warning(
-            "%s: rule %s has unknown category %r; classifying it instead",
+            "%s: rule %s has an unusable category %r; classifying it instead",
             where,
             rid,
             category,
