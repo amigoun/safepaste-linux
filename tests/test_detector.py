@@ -859,6 +859,36 @@ def test_a_key_across_a_window_seam_is_found_once_and_whole(
     assert [text[f.start : f.end] for f in keys] == [pem]
 
 
+def test_a_lookahead_sees_past_its_window(detector: Detector) -> None:
+    """`kubectl get -o yaml` with a long last-applied-configuration annotation
+    puts `kind: Secret` well below `data:`; the window holding `data:` must
+    still see it."""
+    from safepaste.detector import engine
+
+    filler = "2026-10-06T12:00:00Z INFO reconcile tick ok\n"
+    annotation = '{"apiVersion":"v1","metadata":{"labels":{' + ",".join(
+        f'"team-{i:04d}":"platform"' for i in range(560)
+    ) + "}}}"
+    manifest = (
+        "apiVersion: v1\n"
+        + _SECRET_DATA
+        + "metadata:\n  annotations:\n"
+        + "".join(f"    example.com/owner-{i:02d}: platform-team\n" for i in range(60))
+        + f"    kubectl.kubernetes.io/last-applied-configuration: {annotation}\n"
+        + "  name: app-creds\nkind: Secret\ntype: Opaque\n"
+    )
+    head = filler * (55_200 // len(filler))
+    text = head + manifest + filler * 1000
+    pos, _, owned = engine._windows(text)[0]
+    data_at = text.index("data:")
+    kind_at = text.index("kind: Secret")
+    assert len(text) >= 65_536
+    assert owned - 3_000 < data_at < owned - 1_000
+    assert kind_at - data_at > 12_000 and kind_at > pos + engine.SCAN_WINDOW_CHARS
+
+    assert _k8s_values(detector, text) == _SECRET_VALUES
+
+
 def test_a_match_longer_than_a_window_is_not_cut_at_the_window_edge(
     ruleset: RuleSet,
 ) -> None:

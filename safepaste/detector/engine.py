@@ -67,6 +67,12 @@ DEFAULT_REGEX_TIMEOUT = 0.25
 # since a match is only kept by the window it starts in.
 SCAN_WINDOW_CHARS = 65_536
 SCAN_WINDOW_OVERLAP = 8_192
+# How much further each window reads, for lookaheads only: a match starting
+# there still belongs to the next window. A lookahead cannot see past the end of
+# the scanned text, so a rule that checks for something below its match --
+# `kind: Secret` under a Secret's `data:`, past a long annotation -- failed
+# whenever that fell beyond the window.
+SCAN_READ_AHEAD = 32_768
 
 
 # Named in the digest itself, so a config file states which algorithm produced
@@ -310,7 +316,7 @@ class Detector:
                         text, pos, endpos, timeout=self.regex_timeout
                     ):
                         if m.start() >= owned:
-                            continue
+                            break
                         if m.end() == endpos < len(text):
                             # Running into the window's end may have cut it
                             # short -- a base64 blob longer than a window --
@@ -407,9 +413,11 @@ def _windows(text: str) -> list[tuple[int, int, int]]:
 
     Each window owns the stretch up to where the next begins and reads on for at
     least the overlap past it, so a match no longer than the overlap is seen
-    whole by exactly one window. Boundaries fall on line ends where one is near,
-    because `^`, `$` and `\b` treat a window edge as the edge of the text; a
-    line longer than a window is cut mid-way, and the overlap covers the seam.
+    whole by exactly one window. Past that it reads on a further
+    `SCAN_READ_AHEAD`, so that lookaheads see what follows a match near the
+    seam. Boundaries fall on line ends where one is near, because `^`, `$` and
+    `\b` treat a window edge as the edge of the text; a line longer than a
+    window is cut mid-way, and the overlap covers the seam.
     Scanning with pos/endpos rather than slicing keeps offsets those of `text`
     and lets lookbehinds see past the window's start.
     """
@@ -423,7 +431,7 @@ def _windows(text: str) -> list[tuple[int, int, int]]:
         nxt = newline + 1 if newline > pos else stride
         newline = text.rfind("\n", nxt + SCAN_WINDOW_OVERLAP - 1, limit)
         endpos = newline + 1 if newline != -1 else limit
-        out.append((pos, endpos, nxt))
+        out.append((pos, min(n, endpos + SCAN_READ_AHEAD), nxt))
         pos = nxt
     out.append((pos, n, n))
     return out
