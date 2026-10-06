@@ -829,8 +829,11 @@ def _config_log(size: int) -> str:
 @pytest.mark.integration
 @pytest.mark.parametrize("size", [500_000, 1_000_000], ids=["500KB", "1MB"])
 def test_a_secret_at_the_end_of_a_large_log_is_found(
-    detector: Detector, size: int
+    ruleset: RuleSet, size: int
 ) -> None:
+    # A generous timeout: this checks what windowing finds, and a slow CI runner
+    # must not turn it into a test of the machine's speed.
+    detector = Detector(ruleset=ruleset, regex_timeout=5.0)
     text = _config_log(size) + f"AWS_SECRET_ACCESS_KEY={_AWS_SECRET}\n"
     assert len(text.encode()) <= detector.max_scan_bytes
 
@@ -838,6 +841,19 @@ def test_a_secret_at_the_end_of_a_large_log_is_found(
 
     assert not findings.incomplete, f"skipped: {findings.skipped_rules}"
     assert _AWS_SECRET in [text[f.start : f.end] for f in findings]
+
+
+def test_no_regex_call_reads_more_than_one_window_of_a_large_paste() -> None:
+    from safepaste.detector import engine
+
+    text = _config_log(1_000_000)
+    windows = engine._windows(text)
+
+    limit = engine.SCAN_WINDOW_CHARS + engine.SCAN_READ_AHEAD
+    assert all(endpos - pos <= limit for pos, endpos, _ in windows)
+    owned = [pos for pos, _, _ in windows] + [len(text)]
+    assert owned[0] == 0
+    assert all(w[2] == nxt for w, nxt in zip(windows, owned[1:]))
 
 
 @pytest.mark.parametrize("offset", range(57_000, 58_200, 150))
