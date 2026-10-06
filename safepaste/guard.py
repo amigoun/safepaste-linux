@@ -346,7 +346,7 @@ class Guard:
 
     def _sanitise(self, event: ClipboardEvent) -> tuple[Sanitised | None, bool]:
         """Redact every text-bearing representation of `event`, or None if clean,
-        and whether any of them was scanned only in part.
+        and whether the copy, as the user will paste it, was scanned only in part.
 
         A rich representation is kept only when its own scan accounts for every
         secret the plain text had and none of the values found anywhere survive
@@ -361,7 +361,15 @@ class Guard:
             for name, value in event.representations.items()
         }
         scans = [plain, *(found for _, found in scanned.values())]
-        incomplete = any(getattr(found, "incomplete", False) for found in scans)
+        # Said from the plain text, which is what most targets paste: a Word or
+        # Excel copy's markup is routinely past the cap while its text is not.
+        # Markup speaks only when there is no text. A partly scanned
+        # representation is still never kept, so this is about the notice alone.
+        incomplete = (
+            getattr(plain, "incomplete", False)
+            if event.text
+            else any(getattr(found, "incomplete", False) for found in scans)
+        )
         if not any(scans):
             return None, incomplete
 

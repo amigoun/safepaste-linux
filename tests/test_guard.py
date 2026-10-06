@@ -429,6 +429,37 @@ def test_a_fully_scanned_clean_copy_says_nothing(guard_factory) -> None:
     assert told == []
 
 
+class _RichPartly:
+    """Scans plain text in full and markup only in part, as with a rich copy
+    whose HTML is past the scan cap while its text is not."""
+
+    def __init__(self, real) -> None:
+        self.real = real
+
+    def scan(self, text: str):
+        found = self.real.scan(text)
+        return _PartialScan(found) if text.startswith("<") else found
+
+
+def test_an_oversized_rich_copy_with_clean_plain_text_says_nothing(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact")
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.detector = _RichPartly(guard.detector)
+    text = "an entirely ordinary sentence"
+    guard.handle(ClipboardEvent.of(text, representations={"text/html": f"<p>{text}</p>"}))
+    assert told == []
+
+
+def test_a_partly_scanned_markup_only_copy_is_reported(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact")
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.detector = _RichPartly(guard.detector)
+    guard.handle(ClipboardEvent.of("", representations={"text/html": "<p>a large table</p>"}))
+    assert len(told) == 1
+
+
 # --- on-demand path -------------------------------------------------------
 
 
