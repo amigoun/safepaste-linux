@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import regex
@@ -376,12 +376,18 @@ def _compile_all(patterns: list[str]) -> list[regex.Pattern]:
 
 
 def _parse_rule(raw: dict[str, Any], where: str) -> Rule | None:
-    """Build a Rule, or None for a rule with no regex to run.
+    """Build a Rule, or None for a rule with no regex to run (path-only, or a
+    bare `enabled`/`default_off` override of a rule loaded earlier).
 
     Raises MalformedEntry for a rule that cannot be used as written, and
     UncompilableRule for one whose regex this `regex` cannot compile.
     """
     rid = raw["id"]
+    # A string here is truthy whatever it says, so `enabled = "false"` would
+    # quietly leave the rule on: refuse it rather than guess.
+    for switch in ("enabled", "default_off"):
+        if not isinstance(raw.get(switch, False), bool):
+            raise MalformedEntry(f"{switch} must be true or false")
     pattern_src = raw.get("regex")
     if not pattern_src:
         # Path-only rules (e.g. pkcs12-file) cannot apply to a clipboard: there
@@ -407,11 +413,6 @@ def _parse_rule(raw: dict[str, Any], where: str) -> Rule | None:
         or secret_group < 0
     ):
         raise MalformedEntry("secretGroup must be a non-negative integer")
-    # A string here is truthy whatever it says, so `enabled = "false"` would
-    # quietly leave the rule on: refuse it rather than guess.
-    for switch in ("enabled", "default_off"):
-        if not isinstance(raw.get(switch, False), bool):
-            raise MalformedEntry(f"{switch} must be true or false")
     category = raw.get("category")
     if category is not None and category not in CATEGORIES:
         log.warning(
@@ -485,7 +486,17 @@ def load_file(path: pathlib.Path, into: RuleSet) -> None:
             log.warning("%s: skipping rule %s: %s", path, rid, exc)
             continue
         if rule is None:
-            into.skipped.append((rid, "no usable regex"))
+            switches = {k: raw[k] for k in ("enabled", "default_off") if k in raw}
+            if rid in seen and switches:
+                # A veto names the rule it silences and nothing else; making
+                # the user copy the regex too would mean a typo in that copy
+                # leaves the rule they meant to turn off still running.
+                into.rules = [
+                    replace(r, **switches) if r.id == rid else r
+                    for r in into.rules
+                ]
+            else:
+                into.skipped.append((rid, "no usable regex"))
             continue
         if rule.id in seen:
             # Later files win, so a user file can retune a vendored rule by id.

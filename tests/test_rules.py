@@ -207,6 +207,45 @@ def test_vetoed_rule_finds_nothing(tmp_path) -> None:
     assert not [f for f in detector.scan(text) if f.rule_id == "github-pat"]
 
 
+def test_a_veto_needs_only_the_id(tmp_path) -> None:
+    """`id` + `enabled = false` is the whole veto; copying the regex is not
+    required, and a typo in such a copy is how a veto quietly fails."""
+    path = tmp_path / "veto.toml"
+    path.write_text('[[rules]]\nid = "github-pat"\nenabled = false\n', encoding="utf-8")
+
+    rs = load_default(extra_paths=[path])
+
+    assert "github-pat" not in {r.id for r in rs.enabled_for(None)}
+    detector = Detector(ruleset=rs)
+    text = "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z"
+    assert not [f for f in detector.scan(text) if f.rule_id == "github-pat"]
+    # The rule is silenced, not replaced: everything else about it is intact.
+    rule = next(r for r in rs.rules if r.id == "github-pat")
+    assert rule.pattern.pattern == next(
+        r for r in load_default().rules if r.id == "github-pat"
+    ).pattern.pattern
+
+
+def test_default_off_alone_makes_a_bundled_rule_opt_in(tmp_path) -> None:
+    path = tmp_path / "quiet.toml"
+    path.write_text('[[rules]]\nid = "github-pat"\ndefault_off = true\n', encoding="utf-8")
+
+    rs = load_default(extra_paths=[path])
+
+    assert "github-pat" not in {r.id for r in rs.enabled_for(None)}
+    assert "github-pat" in {r.id for r in rs.enabled_for(frozenset({"tokens"}))}
+
+
+def test_a_string_veto_without_a_regex_is_refused(tmp_path, caplog) -> None:
+    path = tmp_path / "veto.toml"
+    path.write_text('[[rules]]\nid = "github-pat"\nenabled = "false"\n', encoding="utf-8")
+
+    rs = load_default(extra_paths=[path])
+
+    assert next(r for r in rs.rules if r.id == "github-pat").enabled is True
+    assert "enabled must be true or false" in caplog.text
+
+
 def test_default_off_is_not_a_veto() -> None:
     """`default_off` withholds a rule by default but must stay switchable."""
     ruleset = load_default()
