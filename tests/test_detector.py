@@ -479,8 +479,8 @@ URL_PASSWORDS = [
         id="at-sign-and-bang",
     ),
     pytest.param(
-        "https://deploy:Zq8v@R2k/LmN4pT7w@registry.example.test/v2/",
-        "Zq8v@R2k/LmN4pT7w",
+        "https://deploy:Zq8v@R2kLmN4pT7w@registry.example.test/v2/",
+        "Zq8v@R2kLmN4pT7w",
         id="generic-scheme",
     ),
 ]
@@ -512,6 +512,34 @@ def test_a_url_without_a_password_is_not_flagged(
     detector: Detector, text: str
 ) -> None:
     assert detector.scan(text) == []
+
+
+def test_an_at_sign_in_the_path_does_not_extend_a_url_password(
+    detector: Detector,
+) -> None:
+    """An `@` belongs to the password only when another follows before the
+    path; npm scopes and profile URLs put one after the host."""
+    text = "https://alice:s3cretPassw0rd@registry.example.com/@scope/pkg"
+    assert [text[f.start : f.end] for f in detector.scan(text)] == ["s3cretPassw0rd"]
+    assert detector.scan("https://medium.com/@user/post") == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "x://a:" + "@" * 5000,
+        "postgres://a:" + "@" * 5000,
+        "x://a:" + "b" * 50_000,
+        "postgres://a:" + "b" * 50_000,
+        "x://a:" + "b@" * 5000 + "/",
+    ],
+    ids=["at-run", "db-at-run", "no-at", "db-no-at", "at-chain-then-slash"],
+)
+def test_a_url_password_rule_does_not_backtrack_badly(text: str) -> None:
+    from safepaste.detector import load_default
+
+    found = Detector(load_default(), regex_timeout=0.25).scan(text)
+    assert not found.skipped_rules
 
 
 # ---------------------------------------------------------------------------

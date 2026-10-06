@@ -59,17 +59,19 @@ regexes = [
 # The password group is what gets redacted; scheme, user, host and database all
 # survive, which keeps the string recognisable.
 #
-# The password runs to the *last* `@` before the host and may hold `/`: people
-# paste passwords raw rather than percent-encoded, and stopping at the first `@`
-# printed the rest of the password as if it were the host. The user may be
-# empty (`redis://:password@host`). What cannot be a password is a port, which
-# is how `scheme://host:5432/path@x` would otherwise read as `user:password@`.
+# The password may hold `/` and `@`: people paste passwords raw rather than
+# percent-encoded, and stopping at the first `@` printed the rest of the
+# password as if it were the host. An `@` is the password's only while another
+# follows before any `/` or space, so one in the path -- an npm scope, a
+# profile URL -- leaves the host alone. The user may be empty
+# (`redis://:password@host`). What cannot be a password is a port, which is how
+# `scheme://host:5432/path@x` would otherwise read as `user:password@`.
 # --------------------------------------------------------------------------
 [[rules]]
 id = "safepaste-database-url-password"
 description = "Database connection string with an inline password"
 category = "connection_strings"
-regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis(?:s)?|amqps?|clickhouse|cockroachdb|mssql|sqlserver|jdbc:[a-z0-9]+)://[^\s:/@]{0,64}:(?!\d{1,5}(?:[/?#]|$))([^\s"'`]{3,256})@'''
+regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis(?:s)?|amqps?|clickhouse|cockroachdb|mssql|sqlserver|jdbc:[a-z0-9]+)://[^\s:/@]{0,64}:(?!\d{1,5}(?:[/?#]|$))((?:[^\s"'`@]|@(?=[^\s"'`/@]*@)){3,256})@'''
 keywords = [
     "postgres", "postgresql", "mysql", "mariadb", "mongodb", "redis",
     "amqp", "clickhouse", "cockroachdb", "mssql", "sqlserver", "jdbc:",
@@ -79,7 +81,7 @@ keywords = [
 id = "safepaste-generic-url-password"
 description = "URL with an inline password"
 category = "connection_strings"
-regex = '''(?i)\b[a-z][a-z0-9+.-]{2,20}://[^\s:/@]{0,64}:(?!\d{1,5}(?:[/?#]|$))([^\s"'`]{6,256})@[a-z0-9.-]+'''
+regex = '''(?i)\b[a-z][a-z0-9+.-]{2,20}://[^\s:/@]{0,64}:(?!\d{1,5}(?:[/?#]|$))((?:[^\s"'`@]|@(?=[^\s"'`/@]*@)){6,256})@[a-z0-9.-]+'''
 keywords = ["://"]
 entropy = 2.2
   [[rules.allowlists]]
