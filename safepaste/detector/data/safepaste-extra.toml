@@ -69,6 +69,25 @@ entropy = 2.2
   ]
 
 # --------------------------------------------------------------------------
+# PEM private keys. Replaces upstream's private-key, whose lazy
+# `[\s\S-]{64,}?KEY-----` runs on past a short block into the next one: a
+# hand-redacted or template key above a real one became a single match, either
+# dropped whole as already redacted or ending early enough to print the real
+# key's body. Here the body cannot contain `-----`, so a match stops at the
+# first armour line after its BEGIN and must end on a PRIVATE KEY END line.
+#
+# The second branch is a selection that stops before the END line -- the top of
+# a key copied on its own. It runs from the header through any `Proc-Type:`
+# style lines and the base64 lines that follow, and no further, so the prose
+# after a cut-off key is left alone.
+# --------------------------------------------------------------------------
+[[rules]]
+id = "private-key"
+description = "Private key"
+regex = '''(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----(?:(?>(?:[^-]|-(?!----)){64,})-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----|(?>(?:\r?\n[ \t]*[\w-]+:[^\r\n]*)*(?:\r?\n[ \t]*)?\r?\n[ \t]*[A-Za-z0-9+/=]{40,}(?:\r?\n[ \t]*[A-Za-z0-9+/=]+)*)(?!\r?\n[ \t]*-----END))'''
+keywords = ["-----begin"]
+
+# --------------------------------------------------------------------------
 # HTTP Authorization headers, as pasted out of browser devtools or a .http file.
 # Upstream covers the `curl -H` form only.
 # --------------------------------------------------------------------------

@@ -188,6 +188,78 @@ def test_false_positive_corpus_yields_no_findings(detector: Detector, text: str)
 
 
 # ---------------------------------------------------------------------------
+# PEM private keys beside other PEM blocks, and cut short
+# ---------------------------------------------------------------------------
+
+_KEY_BODY = (
+    "IpHYzcMQQR5+wnN4pmHJNRh8B+TVY26bw8QAsnJEuM06l/Ea5lEHBQamigLw4WGv\n"
+    "N/hsuQeHOMNw8H6NO1g7rTjCdfNK7QVq1uqO7KQZL6H+udxLHr5V5bj5toDv92yB\n"
+    "1OmrME1Ilvnhf9jwgWSW2gh6Pr7MZ2qqLF2M4bPGrLxfFnCpghvHKYXXZF59uwd4\n"
+    "6VH4mfh0HEA3yJ7H+uSK3rB4qVtCLoo1\n"
+)
+_REAL_KEY = (
+    "-----BEGIN RSA PRIVATE KEY-----\n" + _KEY_BODY + "-----END RSA PRIVATE KEY-----"
+)
+
+
+@pytest.mark.parametrize(
+    "before",
+    [
+        "-----BEGIN RSA PRIVATE KEY-----\n[REDACTED]\n-----END RSA PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----\n<base64>\n-----END RSA PRIVATE KEY-----",
+    ],
+    ids=["hand-redacted-key-first", "template-key-first"],
+)
+def test_a_real_key_after_a_short_pem_block_is_found_on_its_own(
+    detector: Detector, before: str
+) -> None:
+    """A match must not run from one block's BEGIN into the next one.
+
+    It used to, and the result depended on what came first: a hand-redacted
+    block made the whole span read as already redacted and nothing was
+    reported; a template block made the match end on the real key's BEGIN
+    line, so redacting it printed the real key's body.
+    """
+    text = f"Old key:\n{before}\n\nNew key:\n{_REAL_KEY}\n"
+
+    keys = [f for f in detector.scan(text) if f.rule_id == "private-key"]
+
+    assert [text[f.start : f.end] for f in keys] == [_REAL_KEY]
+
+
+def test_the_top_of_a_key_copied_without_its_end_line_is_found(
+    detector: Detector,
+) -> None:
+    head = "-----BEGIN RSA PRIVATE KEY-----\n" + _KEY_BODY[:150]
+    text = f"here is what I have so far:\n{head}\n\nany idea why it fails?"
+
+    keys = [f for f in detector.scan(text) if f.rule_id == "private-key"]
+
+    assert [text[f.start : f.end] for f in keys] == [head]
+
+
+def test_the_top_of_an_encrypted_key_is_found_from_its_header(
+    detector: Detector,
+) -> None:
+    head = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "Proc-Type: 4,ENCRYPTED\n"
+        "DEK-Info: AES-128-CBC,3F2A9C1E7B5D4F6A8C0E2B4D6F8A0C1E\n"
+        "\n" + _KEY_BODY.rstrip("\n")
+    )
+
+    keys = [f for f in detector.scan(head) if f.rule_id == "private-key"]
+
+    assert [head[f.start : f.end] for f in keys] == [head]
+
+
+def test_a_short_pem_block_alone_is_not_a_key(detector: Detector) -> None:
+    text = "-----BEGIN PRIVATE KEY-----\n<base64>\n-----END PRIVATE KEY-----\n"
+
+    assert detector.scan(text) == []
+
+
+# ---------------------------------------------------------------------------
 # OX API keys: the shape questions the two corpora above cannot express.
 # ---------------------------------------------------------------------------
 
