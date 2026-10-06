@@ -354,3 +354,26 @@ def test_the_reader_satisfies_the_backend_contract():
 
     assert isinstance(X11SelectionReader(connect=lambda: FakeXConnection()), ClipboardReader)
     assert isinstance(FallbackReader(), ClipboardReader)
+
+
+def test_a_raising_handler_does_not_remove_the_monitor_watch():
+    """An exception escaping a GLib source callback removes the source.
+
+    The guard runs inside this callback, so one copy that broke the detector
+    used to end clipboard monitoring for the rest of the session, silently.
+    """
+    from safepaste.backend import ClipboardEvent
+    from safepaste.clipboard.monitor import XFixesMonitor
+
+    class _Reader:
+        def read_text(self):
+            return ClipboardEvent.of(PAYLOAD)
+
+    def on_change(_event):
+        raise ValueError("exclusion key is not valid UTF-8")
+
+    monitor = XFixesMonitor(on_change=on_change, reader=_Reader())
+    monitor._display = object()
+    monitor._drain = lambda: True
+
+    assert monitor._on_fd_ready(0, None, None) is True

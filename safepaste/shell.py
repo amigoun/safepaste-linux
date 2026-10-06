@@ -92,6 +92,9 @@ class PollingShell:
             timer=self.timer,
         )
         self._stop = False
+        # Set while consecutive polls keep failing, so a fault that recurs on
+        # every tick is logged once rather than three times a second.
+        self._poll_failing = False
         self._hotkey = None
         self._listener = None
         self._tray = None
@@ -211,6 +214,22 @@ class PollingShell:
         if not open_homepage():
             self.notify("SafePaste", HOMEPAGE)
 
+    def _poll(self) -> None:
+        """One clipboard check that cannot end the loop.
+
+        The hotkey, menu and timer paths already survive a raising handler. This
+        one reaches the detector and the exclusion key on every copy, so an
+        exception escaping it would end protection for good.
+        """
+        try:
+            self.guard.monitor.poll_once()
+        except Exception:  # noqa: BLE001 - one bad copy must not end protection
+            if not self._poll_failing:
+                log.exception("clipboard check failed; still watching")
+            self._poll_failing = True
+        else:
+            self._poll_failing = False
+
     def run(self) -> int:
         if not self.guard.start():
             return 1
@@ -235,7 +254,7 @@ class PollingShell:
                 # Still polled even when notifications are active. The poll is one
                 # integer compare when nothing changed, and it means a missed or
                 # unsupported notification degrades latency rather than correctness.
-                self.guard.monitor.poll_once()
+                self._poll()
                 self.timer.run_due()
                 time.sleep(self.interval)
         finally:

@@ -287,12 +287,12 @@ class XFixesMonitor:
         if self._display is None:
             return False
         try:
-            changed = self._drain()
+            if self._drain():
+                self._handle_change()
         except Exception as exc:  # noqa: BLE001 - never let the loop die
+            # Including the guard's own failures: an exception escaping a GLib
+            # source callback removes the watch, and monitoring stops silently.
             log.exception("clipboard monitor error: %s", exc)
-            return True
-        if changed:
-            self._handle_change()
         return True
 
     def _drain(self) -> bool:

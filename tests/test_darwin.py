@@ -586,6 +586,47 @@ def test_polling_shell_refuses_a_non_poll_backend(tmp_path, monkeypatch) -> None
         )
 
 
+def test_a_raising_clipboard_check_does_not_stop_the_shell(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """One copy that breaks the guard must not end protection for every later one.
+
+    And a fault that recurs on every tick is logged once, not three times a second.
+    """
+    import logging
+
+    import safepaste.config as config_mod
+    import safepaste.shell as shell_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+    monkeypatch.setattr(shell_mod.signal, "signal", lambda *_a: None)
+
+    shell = PollingShell(
+        config_mod.Config(mode="redact").validated(),
+        backend=DarwinBackend(pasteboard=FakePasteboard({UTI_STRING: "quiet"})),
+        interval=0,
+        notify=lambda _t, _b: True,
+    )
+    monkeypatch.setattr(shell, "_attach_platform_extras", lambda: None)
+    polls: list[int] = []
+
+    def poll_once() -> None:
+        polls.append(1)
+        if len(polls) == 4:
+            shell.stop()
+        raise ValueError("exclusion key is not valid UTF-8")
+
+    monkeypatch.setattr(shell.guard.monitor, "poll_once", poll_once)
+    caplog.set_level(logging.ERROR, logger="safepaste.shell")
+
+    assert shell.run() == 0
+    assert len(polls) == 4, "the loop kept polling after the first failure"
+    assert len(caplog.records) == 1
+
+
 def test_sleep_timer_fires_due_callbacks_only() -> None:
     from safepaste.shell import _SleepTimer
 
