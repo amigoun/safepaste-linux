@@ -5,6 +5,9 @@ placeholder or a category switched off: each has to mean the same thing to
 `safepaste scan` as to the clipboard guard, or the CLI answers a different
 question from the one the user configured. Every test here runs against a
 private config directory, never the developer's own.
+
+The input-handling checks at the end live here for the same reason: they need
+that private directory, since `hash` reads its key from it.
 """
 
 from __future__ import annotations
@@ -204,3 +207,20 @@ def test_the_scan_limit_floor_itself_is_accepted(
     floor = str(config_mod.MIN_SCAN_BYTES)
     code, _, _ = _run(monkeypatch, capsys, ["scan", "--max-bytes", floor, "-"], GITHUB)
     assert code == 1
+
+
+# ---------------------------------------------------------------------------
+# input that is not there
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("argv", [["scan", "-"], ["redact", "-"], ["hash"]])
+def test_a_closed_stdin_is_unreadable_input_not_a_crash(
+    config_dir, monkeypatch, capsys, argv: list[str]
+) -> None:
+    """`safepaste scan - <&-`: Python hands over sys.stdin as None."""
+    monkeypatch.setattr(sys, "stdin", None)
+    assert cli.main(argv) == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "standard input is closed" in err

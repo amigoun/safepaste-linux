@@ -18,6 +18,7 @@ place secret-shaped text legitimately leaves the process, already sanitised.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import logging
 import os
@@ -63,6 +64,9 @@ log = logging.getLogger(__name__)
 def _read_bytes(path: str) -> bytes:
     """Raw bytes from a path, or stdin when path is '-'."""
     if path == "-":
+        # Python sets sys.stdin to None when started with fd 0 closed (`<&-`).
+        if sys.stdin is None:
+            raise OSError(errno.EBADF, "standard input is closed")
         return sys.stdin.buffer.read()
     return pathlib.Path(path).read_bytes()
 
@@ -435,9 +439,9 @@ def _print_rule_stats(rules: list[Rule], ruleset: RuleSet, *, as_json: bool) -> 
 
 def cmd_hash(args: argparse.Namespace) -> int:
     try:
-        raw = sys.stdin.buffer.read()
+        raw = _read_bytes("-")
     except OSError as exc:
-        print(f"safepaste: cannot read stdin: {exc}", file=sys.stderr)
+        print(f"safepaste: cannot read stdin: {exc.strerror or exc}", file=sys.stderr)
         return 2
 
     text = _decode(raw)
