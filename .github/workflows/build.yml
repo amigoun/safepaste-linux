@@ -629,7 +629,28 @@ jobs:
           # Notes go via a file rather than a heredoc: gh accepts only one of
           # --notes/--notes-file/--generate-notes, and a heredoc nested in a YAML
           # block scalar is easy to break with a stray indent.
+          #
+          # The changelog is the release commit's own body. This project already
+          # writes one properly for every release -- what changed, why, and what
+          # it costs -- so lifting it here means the notes cannot drift from what
+          # actually shipped, and there is no second place to keep up to date.
+          # --generate-notes was the alternative and would have listed commit
+          # subjects, which says what was touched rather than what it means.
+          #
+          # Guarded on the subject: a tag placed on something that is not a
+          # release commit falls back to install instructions alone, rather than
+          # publishing an unrelated commit message as a changelog.
           {
+            if git log -1 --format=%s | grep -q '^Release '; then
+              echo '## What changed'
+              echo
+              git log -1 --format=%b \
+                | grep -v '^Co-Authored-By:' \
+                | awk '{a[NR]=$0} END{n=NR; while(n>0 && a[n]=="") n--; for(i=1;i<=n;i++) print a[i]}'
+              echo
+              echo '---'
+              echo
+            fi
             echo '## Linux (Debian/Ubuntu)'
             echo
             echo '    sudo apt install ./safepaste_*_all.deb'
