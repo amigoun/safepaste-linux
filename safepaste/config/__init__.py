@@ -522,7 +522,6 @@ def _restrict_to_owner(path: pathlib.Path) -> None:
     for target, mode in ((path, 0o600), (path.parent, 0o700)):
         try:
             if stat.S_IMODE(target.stat().st_mode) & 0o077:
-                # OX Agent: Sensitive Data Exposure prevented by restoring owner-only permissions on the key
                 os.chmod(target, mode)
                 log.warning(
                     "%s was open to other users; restricted it to %o", target, mode
