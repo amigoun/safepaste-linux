@@ -506,6 +506,83 @@ def test_a_partly_scanned_markup_only_copy_is_reported(guard_factory) -> None:
     assert len(told) == 1
 
 
+# A rich copy whose markup is past the scan cap while its text is not: the
+# detector is the real one with a small cap, and formatting each word pushes
+# what follows out of the markup's own scan.
+SCAN_CAP = 4096
+FILLER_WORDS = "an ordinary quarterly figure " * 100
+
+
+def _past_the_cap(guard_factory, tail: str, *, name: str = "text/html"):
+    guard, backend, events = guard_factory(mode="redact")
+    guard.detector.max_scan_bytes = SCAN_CAP
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    words = FILLER_WORDS.split()
+    if "html" in name:
+        rich = "".join(f'<span class="body">{w} </span>' for w in words) + tail
+    else:
+        rich = r"{\rtf1\ansi " + "".join(rf"{{\f0\fs24 {w} }}" for w in words) + tail + "}"
+    text = f"{FILLER_WORDS}report"
+    assert len(text) < SCAN_CAP < rich.index(tail)
+    guard.handle(ClipboardEvent.of(text, representations={name: rich}))
+    return text, backend, events, told
+
+
+def test_a_token_in_a_link_past_the_scan_cap_is_removed(guard_factory) -> None:
+    text, backend, events, told = _past_the_cap(
+        guard_factory, f'<a href="https://ci.example/?token={SECRET}">report</a>'
+    )
+
+    assert backend.writer.writes == [text], "the markup holding it is dropped"
+    assert len(events) == 1 and "GitHub PAT" in events[0][1].labels
+    assert told == [], "what the text cannot show was checked in full"
+
+
+def test_a_clean_link_past_the_scan_cap_says_nothing(guard_factory) -> None:
+    _, backend, events, told = _past_the_cap(
+        guard_factory, '<a href="https://ci.example/?run=42">report</a>'
+    )
+    assert backend.writer.writes == [] and events == [] and told == []
+
+
+def test_a_token_held_only_escaped_in_the_markup_is_still_removed(guard_factory) -> None:
+    """Unescaped, the value is in no representation verbatim, so it is counted
+    from the markup's hidden parts and goes with the markup."""
+    text, backend, events, told = _past_the_cap(
+        guard_factory, '<a href="postgres://app:Xk9&amp;vQ2mL7pR4@db.internal/prod">db</a>'
+    )
+
+    assert backend.writer.writes == [text]
+    assert len(events) == 1 and events[0][1].secrets_removed == 1
+    assert told == []
+
+
+def test_a_token_in_an_rtf_link_past_the_scan_cap_is_removed(guard_factory) -> None:
+    link = (
+        r'{\field{\*\fldinst{HYPERLINK "https://ci.example/?token=' + SECRET
+        + r'"}}{\fldrslt report}}'
+    )
+    text, backend, events, told = _past_the_cap(guard_factory, link, name="public.rtf")
+
+    assert backend.writer.writes == [text]
+    assert len(events) == 1 and told == []
+
+
+def test_hidden_parts_too_large_to_scan_whole_say_partly_checked(guard_factory) -> None:
+    links = "".join(f'<a href="https://docs.example/page/{i}">p</a>' for i in range(400))
+    _, backend, events, told = _past_the_cap(guard_factory, links)
+    assert len(told) == 1 and backend.writer.writes == [] and events == []
+
+
+def test_markup_that_cannot_be_read_says_partly_checked(guard_factory, monkeypatch) -> None:
+    import safepaste.markup as markup
+
+    monkeypatch.setattr(markup, "hidden_parts", lambda *_a, **_k: None)
+    _, _, _, told = _past_the_cap(guard_factory, '<a href="https://ci.example/">r</a>')
+    assert len(told) == 1
+
+
 # --- on-demand path -------------------------------------------------------
 
 

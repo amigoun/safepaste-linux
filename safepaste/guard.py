@@ -26,8 +26,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from . import config as config_mod
+from . import markup
 from .backend import Backend, ClipboardEvent, get_backend
 from .detector import Detector, Finding, load_default, summarise, value_hash
+from .detector.engine import RULE_BUDGET_TIMEOUTS
 from .redactor import Redaction, RedactionStyle, redact
 
 log = logging.getLogger(__name__)
@@ -393,13 +395,32 @@ class Guard:
             name: (value, self.detector.scan(value))
             for name, value in event.representations.items()
         }
-        scans = [plain, *(found for _, found in scanned.values())]
+        # A representation scanned only in part still has its visible text
+        # checked, as the plain one; what that cannot show -- a link's address,
+        # a comment -- is checked here, so the unscanned tail of a large rich
+        # copy cannot pass a token as clean.
+        hidden = {
+            name: self._scan_hidden(name, value)
+            for name, (value, found) in scanned.items()
+            if event.text and getattr(found, "incomplete", False)
+        }
+        checked = [pair for pair in hidden.values() if pair is not None]
+        scans = [
+            plain,
+            *(found for _, found in scanned.values()),
+            *(found for _, found in checked),
+        ]
         # Said from the plain text, which is what most targets paste: a Word or
         # Excel copy's markup is routinely past the cap while its text is not.
-        # Markup speaks only when there is no text. A partly scanned
-        # representation is still never kept, so this is about the notice alone.
+        # Beyond that, markup speaks through what its text cannot show, and
+        # whole when there is no text. A partly scanned representation is still
+        # never kept, so this is about the notice alone.
         incomplete = (
             getattr(plain, "incomplete", False)
+            or any(
+                pair is None or getattr(pair[1], "incomplete", False)
+                for pair in hidden.values()
+            )
             if event.text
             else any(getattr(found, "incomplete", False) for found in scans)
         )
@@ -409,7 +430,7 @@ class Guard:
         in_plain = {event.text[f.start : f.end] for f in plain}
         # Each secret value, with a finding to attribute its other occurrences to.
         sources: dict[str, Finding] = {}
-        for text, found in [(event.text, plain), *scanned.values()]:
+        for text, found in [(event.text, plain), *scanned.values(), *checked]:
             for f in found:
                 sources.setdefault(text[f.start : f.end], f)
         values = set(sources)
@@ -430,8 +451,18 @@ class Guard:
             else:
                 log.info("dropping the %s representation; it cannot be shown clean", name)
 
-        findings, result = max(reports, key=lambda report: report[1].secrets_removed)
-        labels = tuple(dict.fromkeys(lb for _, r in reports for lb in r.labels))
+        # A value found only in the hidden parts in a form no representation
+        # holds verbatim -- unescaped from an attribute -- goes with the partly
+        # scanned representation that held it, so it is counted from those.
+        hidden_reports = [
+            (found, redact(text, found, style)) for text, found in checked if found
+        ]
+        findings, result = max(
+            reports or hidden_reports, key=lambda report: report[1].secrets_removed
+        )
+        labels = tuple(
+            dict.fromkeys(lb for _, r in [*reports, *hidden_reports] for lb in r.labels)
+        )
         # Digests, not the values: this outlives the retention window, and
         # "never flag this again" only ever needs to compare.
         key = self._exclusion_key()
@@ -444,6 +475,16 @@ class Guard:
                 tuple(value_hash(v, key) for v in sorted(values)) if key is not None else ()
             ),
         ), incomplete
+
+    def _scan_hidden(self, name: str, value: str) -> tuple[str, Any] | None:
+        """What `value` holds beyond its rendered text, and its scan; None when
+        that cannot be read, which leaves the copy partly checked."""
+        parts = markup.hidden_parts(
+            name, value, timeout=self.config.regex_timeout * RULE_BUDGET_TIMEOUTS
+        )
+        if parts is None:
+            return None
+        return parts, self.detector.scan(parts)
 
     def _write(self, text: str, representations: dict[str, str], flavour: str) -> bool:
         """Replace the whole clipboard with `text` and `representations`."""

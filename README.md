@@ -65,7 +65,10 @@ so on macOS and Windows `ask` runs as `redact` and the tray does not offer it.
 
 A copy too large to check completely is never passed as clean: you get a *Clipboard
 not fully checked* notification, alongside any secrets-removed notice, because the
-unchecked part may still hold a secret.
+unchecked part may still hold a secret. On macOS, HTML or RTF past the limit counts
+as checked when its plain text was, and what the text cannot show — link addresses,
+other attributes, comments, scripts — was checked in full too, so a large Office
+copy does not raise the notice and a token in a link near its end is still removed.
 
 ## Install
 
