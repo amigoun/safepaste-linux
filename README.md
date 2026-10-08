@@ -325,8 +325,8 @@ outside a GNOME session, you must export those three yourself.
   plain hash only protects a value that was unguessable to begin with: anyone
   holding a list of bare digests can try `hunter2`, `admin` or a weak database
   password offline until one matches. The config directory is `0700`;
-  `config.toml` and `exclusion.key` are `0600`, and SafePaste puts those back if
-  they were loosened. A corrupt key stops exclusions matching (values are flagged
+  `config.toml` and `exclusion.key` are `0600`, and SafePaste puts the key and its
+  directory back if they were loosened. A corrupt key stops exclusions matching (values are flagged
   again) and makes `safepaste hash` exit 2; move it aside to mint a new one. Two consequences worth knowing:
   exclusions do not follow you to another machine unless the key file goes too,
   and bare digests written by 0.6 and earlier are dropped on first run — those
@@ -505,7 +505,7 @@ bug report.
 ```sh
 python3 -m venv --system-site-packages .venv   # for the distro's PyGObject/GTK4
 .venv/bin/pip install regex python-xlib pytest
-.venv/bin/python -m pytest -q                  # 568 tests
+.venv/bin/python -m pytest -q                  # 653 tests
 ```
 
 `--system-site-packages` is required: GTK4 and libadwaita come from the distro's
