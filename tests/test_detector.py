@@ -483,6 +483,16 @@ URL_PASSWORDS = [
         "Zq8v@R2kLmN4pT7w",
         id="generic-scheme",
     ),
+    pytest.param(
+        "postgres://u:pa'ssW0rd9@h/db",
+        "pa'ssW0rd9",
+        id="quote-in-password",
+    ),
+    pytest.param(
+        'https://deploy:Zq8v"R2kLmN4pT7w@registry.example.test/v2/',
+        'Zq8v"R2kLmN4pT7w',
+        id="generic-scheme-quote",
+    ),
 ]
 
 
@@ -506,6 +516,9 @@ def test_a_url_password_is_found_whole(
         "postgres://db.internal:5432/app?user=svc@corp",
         "redis://cache.internal:6379/0",
         "https://example.test/a:b@c",
+        # A quote ends the URL's string, so what follows is not its password.
+        '{"u":"redis://cache:6379","b":"svc@corp"}',
+        "['redis://cache:6379', 'svc@corp']",
     ],
 )
 def test_a_url_without_a_password_is_not_flagged(
@@ -532,8 +545,9 @@ def test_an_at_sign_in_the_path_does_not_extend_a_url_password(
         "x://a:" + "b" * 50_000,
         "postgres://a:" + "b" * 50_000,
         "x://a:" + "b@" * 5000 + "/",
+        "postgres://a:" + "b'" * 5000 + "@",
     ],
-    ids=["at-run", "db-at-run", "no-at", "db-no-at", "at-chain-then-slash"],
+    ids=["at-run", "db-at-run", "no-at", "db-no-at", "at-chain-then-slash", "quote-run"],
 )
 def test_a_url_password_rule_does_not_backtrack_badly(text: str) -> None:
     from safepaste.detector import load_default
