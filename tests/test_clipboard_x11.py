@@ -369,7 +369,10 @@ def test_a_raising_handler_does_not_remove_the_monitor_watch():
         def read_text(self):
             return ClipboardEvent.of(PAYLOAD)
 
-    def on_change(_event):
+    calls = []
+
+    def on_change(event):
+        calls.append(event)
         raise ValueError("exclusion key is not valid UTF-8")
 
     monitor = XFixesMonitor(on_change=on_change, reader=_Reader())
@@ -377,6 +380,7 @@ def test_a_raising_handler_does_not_remove_the_monitor_watch():
     monitor._drain = lambda: True
 
     assert monitor._on_fd_ready(0, None, None) is True
+    assert calls, "the handler must still run"
 
 
 def test_a_reassert_of_what_we_wrote_is_not_reported():
