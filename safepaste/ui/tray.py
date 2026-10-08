@@ -189,7 +189,6 @@ _PROP_SIG: dict[str, str] = {
 
 _MODE_LABELS: dict[str, str] = {
     "redact": "Redact automatically",
-    "ask": "Ask every time",
     "notify": "Notify only",
     "off": "Off",
 }
@@ -201,13 +200,11 @@ _MODE_LABELS: dict[str, str] = {
 # not have.
 _MODE_STATUS: dict[str, str] = {
     "redact": "Protected",
-    "ask": "Protected (asks first)",
     "notify": "Notify only",
     "off": "Protection off",
 }
 _MODE_TOOLTIP: dict[str, str] = {
     "redact": "Protected — redacting automatically",
-    "ask": "Protected — asks before redacting",
     "notify": "Notify only",
     "off": "Protection off",
 }
@@ -230,7 +227,7 @@ class TrayIndicator:
     _ID_SAFE_PASTE = 3
     _ID_SEP_2 = 4
     _ID_PROTECTION = 5
-    _ID_MODE_BASE = 6  # + enumerate(MODES): redact=6, ask=7, notify=8, off=9
+    _ID_MODE_BASE = 6  # + enumerate(MODES): redact=6, ask=7 (not shown), notify=8, off=9
     _ID_PAUSE_15 = 10
     _ID_PAUSE_60 = 11
     _ID_RESUME = 12
@@ -391,6 +388,10 @@ class TrayIndicator:
         if mode not in MODES:
             log.warning("tray: ignoring unknown mode %r", mode)
             return
+        # Nothing on Linux can ask, so `ask` runs as `redact` (Guard.can_ask)
+        # and is shown as what it does rather than offered as a choice.
+        if mode == "ask":
+            mode = "redact"
         if (mode, paused) == (self._mode, self._paused):
             return
         self._mode = mode
@@ -745,6 +746,7 @@ class TrayIndicator:
                 "children": [],
             }
             for index, mode in enumerate(MODES)
+            if mode != "ask"
         ]
 
         return {

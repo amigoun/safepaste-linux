@@ -59,9 +59,10 @@ PIN to a 3 KB private key. Whatever is asked for, at most half of any secret is
 ever shown and at least four characters always stay hidden, so `keep_prefix = 8`
 cannot print an eight-character password. Short secrets reveal nothing at all.
 
-Other modes are available from Preferences: `ask` (leave the original, ask first),
-`notify` (notification only, clipboard untouched) and `off`. Asking needs a dialog,
-so on macOS and Windows `ask` runs as `redact` and the tray does not offer it.
+Other modes are available from Preferences: `notify` (notification only, clipboard
+untouched) and `off`. The config also accepts `ask` (leave the original, ask first),
+but no front end has a dialog that asks yet, so `ask` runs as `redact` everywhere and
+neither the tray nor Preferences offers it.
 
 A copy too large to check completely is never passed as clean: you get a *Clipboard
 not fully checked* notification, alongside any secrets-removed notice, because the

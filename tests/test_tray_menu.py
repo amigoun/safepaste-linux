@@ -133,10 +133,11 @@ def test_clicking_about_fires_the_about_callback() -> None:
     assert fired == ["about"]
 
 
-def test_the_protection_submenu_offers_every_mode(tray: TrayIndicator) -> None:
+def test_the_protection_submenu_offers_every_mode_but_ask(tray: TrayIndicator) -> None:
     root = tray._build_tree()
     submenu = next(c for c in root["children"] if c["props"].get("label") == "Protection")
-    assert len(submenu["children"]) == len(MODES)
+    assert len(submenu["children"]) == len(MODES) - 1
+    assert "Ask every time" not in [c["props"]["label"] for c in submenu["children"]]
     # Exactly one radio item is ticked, and it is the current mode.
     ticked = [c for c in submenu["children"] if c["props"].get("toggle-state") == 1]
     assert len(ticked) == 1
@@ -150,6 +151,19 @@ def test_the_ticked_mode_follows_set_state(tray: TrayIndicator) -> None:
     ticked = [c for c in submenu["children"] if c["props"].get("toggle-state") == 1]
     assert len(ticked) == 1
     assert ticked[0]["props"]["label"] == "Notify only"
+
+
+def test_ask_is_shown_as_the_redaction_it_runs_as(tray: TrayIndicator) -> None:
+    """Nothing on Linux can ask, so `ask` redacts; the menu says so."""
+    tray.set_state("notify", False)
+    tray.set_state("ask", False)
+    root = tray._build_tree()
+    submenu = next(c for c in root["children"] if c["props"].get("label") == "Protection")
+    ticked = [c for c in submenu["children"] if c["props"].get("toggle-state") == 1]
+    assert [c["props"]["label"] for c in ticked] == ["Redact automatically"]
+    assert _status_line(tray) == "Protected"
+    tray.set_alert(1)
+    assert _status_line(tray) == "1 secret removed"
 
 
 def test_resume_is_hidden_until_paused(tray: TrayIndicator) -> None:
