@@ -45,19 +45,28 @@ from __future__ import annotations
 
 import hashlib
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 
-def content_hash(text: str) -> str:
+def content_hash(text: str, representations: Mapping[str, str] | None = None) -> str:
     """Identity for a clipboard value. Used to recognise our own writes.
 
     Unkeyed on purpose, unlike an exclusion digest: this one lives in memory for
     the length of one clipboard change and is never written anywhere, so there is
     no stored digest for anyone to test guesses against.
+
+    Rich representations count towards it, so two copies with the same visible
+    text over different links are two values, not one. Without any, the digest
+    is that of the text alone.
     """
-    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass"))
+    for name in sorted(representations or {}):
+        for part in (name, representations[name]):
+            encoded = part.encode("utf-8", "surrogatepass")
+            digest.update(len(encoded).to_bytes(8, "big") + encoded)
+    return digest.hexdigest()
 
 
 @dataclass
@@ -74,6 +83,10 @@ class ClipboardEvent:
     # its own flavour naming; portable code must not parse MIME strings.
     has_rich_flavours: bool = False
     flavours: tuple[str, ...] = field(default_factory=tuple)
+    # Rich representations that carry text of their own, by flavour. HTML can
+    # hold a link's URL under visible text that has none, so these are scanned
+    # and redacted alongside `text`. Empty where a backend reads plain text only.
+    representations: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def of(
@@ -83,13 +96,15 @@ class ClipboardEvent:
         flavour: str = "",
         has_rich_flavours: bool = False,
         flavours: tuple[str, ...] = (),
+        representations: Mapping[str, str] | None = None,
     ) -> ClipboardEvent:
         return cls(
             text=text,
-            digest=content_hash(text),
+            digest=content_hash(text, representations),
             flavour=flavour,
             has_rich_flavours=has_rich_flavours,
             flavours=flavours,
+            representations=dict(representations or {}),
         )
 
 
@@ -138,8 +153,14 @@ class ClipboardMonitor(Protocol):
     def start(self) -> bool: ...
     def stop(self) -> None: ...
 
-    def note_own_write(self, text: str) -> None:
-        """Declare a value we are about to place, so its echo is ignored."""
+    def note_own_write(
+        self, text: str, representations: Mapping[str, str] | None = None
+    ) -> None:
+        """Declare a value we have just placed, so its echo is ignored.
+
+        `representations` is passed only by a caller that wrote some, and only
+        to a backend whose events carry them.
+        """
 
 
 @runtime_checkable
@@ -181,7 +202,9 @@ class Tray(Protocol):
     def start(self) -> bool: ...
     def stop(self) -> None: ...
     def set_state(self, mode: str, paused: bool) -> None: ...
-    def set_alert(self, secrets: int) -> None: ...
+    def set_alert(self, secrets: int, removed: bool | None = None) -> None:
+        """`removed` says whether the clipboard was cleaned; None infers it from
+        the mode, which is wrong exactly when a redaction failed."""
     def clear_alert(self) -> None: ...
 
 

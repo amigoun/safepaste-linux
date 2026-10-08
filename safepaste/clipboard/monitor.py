@@ -287,12 +287,12 @@ class XFixesMonitor:
         if self._display is None:
             return False
         try:
-            changed = self._drain()
+            if self._drain():
+                self._handle_change()
         except Exception as exc:  # noqa: BLE001 - never let the loop die
+            # Including the guard's own failures: an exception escaping a GLib
+            # source callback removes the watch, and monitoring stops silently.
             log.exception("clipboard monitor error: %s", exc)
-            return True
-        if changed:
-            self._handle_change()
         return True
 
     def _drain(self) -> bool:
@@ -333,6 +333,8 @@ class XFixesMonitor:
             return
         if self.own_writes.claim(event.digest):
             log.debug("ignoring our own clipboard write")
+            # Kept as the last value seen, so a clipboard manager re-asserting
+            # what we wrote is not taken for a new copy and redacted again.
             self._last_digest = event.digest
             return
         if event.digest == self._last_digest:

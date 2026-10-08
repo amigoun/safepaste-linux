@@ -59,8 +59,17 @@ PIN to a 3 KB private key. Whatever is asked for, at most half of any secret is
 ever shown and at least four characters always stay hidden, so `keep_prefix = 8`
 cannot print an eight-character password. Short secrets reveal nothing at all.
 
-Other modes are available from Preferences: `ask` (leave the original, ask first),
-`notify` (notification only, clipboard untouched) and `off`.
+Other modes are available from Preferences: `notify` (notification only, clipboard
+untouched) and `off`. The config also accepts `ask` (leave the original, ask first),
+but no front end has a dialog that asks yet, so `ask` runs as `redact` everywhere and
+neither the tray nor Preferences offers it.
+
+A copy too large to check completely is never passed as clean: you get a *Clipboard
+not fully checked* notification, alongside any secrets-removed notice, because the
+unchecked part may still hold a secret. On macOS, HTML or RTF past the limit counts
+as checked when its plain text was, and what the text cannot show — link addresses,
+other attributes, comments, scripts — was checked in full too, so a large Office
+copy does not raise the notice and a token in a link near its end is still removed.
 
 ## Install
 
@@ -159,8 +168,10 @@ safepaste 0.10.1
 load, so it reports a version even on a platform where the service cannot
 start — which is usually when you want to know.
 
-`scan` exits 1 when it finds something and 0 when clean, so it composes in
-pipelines — including with itself: redacting is a fixed point, and scanning
+`scan` exits 1 when it finds something, 0 when clean, and 2 when the input could
+not be read or not all of it could be scanned (a rule ran past its time budget, or
+the input was larger than `--max-bytes`); a `scan incomplete` note on stderr says
+which. It composes in pipelines — including with itself: redacting is a fixed point, and scanning
 sanitised output exits 0. The detector recognises the placeholder, so a
 sanitised connection string is not flagged for still looking like
 `user:something@host`. Change the placeholder and `scan` needs to be told, or
@@ -177,6 +188,13 @@ for this at all and says so in the log — it would match inside real secrets an
 turn detection off while still reporting success.
 
 `--json` output carries rule ids, offsets and entropy — never the secret value.
+
+`scan`, `redact` and `rules` read the same `config.toml` as the daemon — custom
+rules, exclusions added with `safepaste hash`, enabled categories, and the
+`[detection]` and `[redaction]` settings — and a flag overrides the matching key.
+`--no-config` uses the built-in defaults only. A config key of the wrong type, or
+one SafePaste does not know, is ignored with a `config:` warning and the default
+stays in effect.
 
 ## How it works on Wayland
 
@@ -245,6 +263,9 @@ out too, because Mutter's bridge is asking the very process that is blocked.
 
 ### Known limitations, stated plainly
 
+- **Only plain text is scanned on Linux and Windows.** A secret that exists only in
+  `text/html` / `CF_HTML` — a link's URL under clean link text — is not caught there
+  yet; macOS scans HTML and RTF too.
 - **Rich formatting is dropped when redacting.** Replacing a selection that
   carried `text/html` leaves plain text only. Safety wins, and the dialog says so.
   Owning the selection means SafePaste *could* now offer several flavours, but the
@@ -303,8 +324,10 @@ outside a GNOME session, you must export those three yourself.
   minted on first use and deliberately kept *out* of `config.toml`, because a
   plain hash only protects a value that was unguessable to begin with: anyone
   holding a list of bare digests can try `hunter2`, `admin` or a weak database
-  password offline until one matches. `~/.config/safepaste/` is `0700`;
-  `config.toml` and `exclusion.key` are `0600`. Two consequences worth knowing:
+  password offline until one matches. The config directory is `0700`;
+  `config.toml` and `exclusion.key` are `0600`, and SafePaste puts the key and its
+  directory back if they were loosened. A corrupt key stops exclusions matching (values are flagged
+  again) and makes `safepaste hash` exit 2; move it aside to mint a new one. Two consequences worth knowing:
   exclusions do not follow you to another machine unless the key file goes too,
   and bare digests written by 0.6 and earlier are dropped on first run — those
   values get flagged once more, and dismissing each re-adds it keyed.
@@ -392,9 +415,16 @@ existing rule id **replaces** it, which is how you retune a vendored rule withou
 editing the vendored copy. Two SafePaste-only keys are honoured:
 
 - `enabled = false` — an absolute veto, for silencing one vendored rule you
-  disagree with. Wins even when its category is switched on.
+  disagree with. Wins even when its category is switched on, and needs only the
+  rule's `id`, not a copy of its regex.
 - `default_off = true` — ships inactive but switchable, for anything too noisy to
   have on by default. This is how the high-entropy detector stays opt-in.
+
+A rule may name its own `category`; add that name to `[protection] categories` to
+switch it on. A global `[[allowlists]]` block may carry Gitleaks' `targetRules` to
+apply only to the rules it names. A rule or allowlist that cannot be used as
+written is skipped with a warning naming the file, rather than crashing the daemon
+or being half-applied.
 
 ## Platforms
 
@@ -408,7 +438,7 @@ stubs that pretend.
 |---|---|---|---|
 | Clipboard monitoring | XFIXES via XWayland | `NSPasteboard.changeCount` | `GetClipboardSequenceNumber` + format listener |
 | Redaction | ✓ | ✓ | ✓ |
-| **Rich formatting preserved** | ✗ only redacted plain text to offer | ✓ multi-representation writes | ✗ plain formats only; `CF_HTML` carries byte offsets that a redaction invalidates |
+| **Rich formatting preserved** | ✗ only redacted plain text to offer | ✓ HTML and RTF are scanned and redacted in place; one that cannot be shown clean is dropped | ✗ plain formats only; `CF_HTML` carries byte offsets that a redaction invalidates |
 | Notifications | ✓ GNOME notifications | ✓ `osascript` | logs only — a balloon needs the tray window, which now exists |
 | Tray icon | ✓ hand-rolled StatusNotifierItem | ✓ `NSStatusItem` | ✓ `Shell_NotifyIcon` |
 | Global hotkey | ✓ `Ctrl+Alt+V` via gsettings | ✓ via Carbon `RegisterEventHotKey` | ✓ via `RegisterHotKey` |
@@ -430,7 +460,7 @@ time there isn't one yet.
 
 Linux is checked live on a real desktop: `scripts/verify-live.py` runs 11 end-to-end
 checks against the actual clipboard. macOS and Windows are checked on CI runners
-against their real clipboard APIs — 30 and 33 checks respectively, on every push.
+against their real clipboard APIs — 37 and 33 checks respectively, on every push.
 Both scripts exit 77 when run on the wrong OS, so a job cannot silently verify
 nothing, and all three save and restore your clipboard and print lengths rather than
 content.
@@ -475,7 +505,7 @@ bug report.
 ```sh
 python3 -m venv --system-site-packages .venv   # for the distro's PyGObject/GTK4
 .venv/bin/pip install regex python-xlib pytest
-.venv/bin/python -m pytest -q                  # 223 tests
+.venv/bin/python -m pytest -q                  # 653 tests
 ```
 
 `--system-site-packages` is required: GTK4 and libadwaita come from the distro's

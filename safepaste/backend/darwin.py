@@ -58,6 +58,14 @@ UTI_STRING = "public.utf8-plain-text"
 UTI_HTML = "public.html"
 UTI_RTF = "public.rtf"
 
+# Rich representations that carry text the plain one may lack -- a link's URL,
+# an RTF field -- so they are scanned too. Each with the legacy name an older
+# application may declare it under; NSPasteboard answers either way.
+TEXT_UTIS = {
+    UTI_HTML: "Apple HTML pasteboard type",
+    UTI_RTF: "NeXT Rich Text Format v1.0 pasteboard type",
+}
+
 # Text-ish UTIs that carry no formatting, so replacing them loses nothing.
 PLAIN_UTIS = frozenset(
     {
@@ -106,6 +114,33 @@ def has_rich_representations(utis: list[str]) -> bool:
     return any(u not in PLAIN_UTIS for u in utis)
 
 
+def pasteboard_form(uti: str, value: str) -> str:
+    """`value` as handed to NSPasteboard for `uti`: pure ASCII for HTML and RTF.
+
+    Both arrive at the pasting application as bytes with no reliable charset:
+    HTML without a <meta charset> is decoded as Latin-1, and RTF is 7-bit. The
+    placeholder's ellipsis then pastes as "â€¦" (measured on a real
+    pasteboard). Each format's own escape for a character is read the same way
+    everywhere, and leaves text that was already ASCII untouched.
+    """
+    if uti == UTI_HTML:
+        return value.encode("ascii", "xmlcharrefreplace").decode("ascii")
+    if uti == UTI_RTF:
+        return "".join(ch if ord(ch) < 0x80 else _rtf_escape(ch) for ch in value)
+    return value
+
+
+def _rtf_escape(ch: str) -> str:
+    # A group with its own \uc1, because the document may have set \uc0, after
+    # which the '?' fallback would be printed rather than skipped.
+    units = ch.encode("utf-16-be", "surrogatepass")
+    codes = (
+        int.from_bytes(units[i : i + 2], "big", signed=True)
+        for i in range(0, len(units), 2)
+    )
+    return "{\\uc1" + "".join(f"\\u{code}?" for code in codes) + "}"
+
+
 class DarwinClipboardReader:
     def __init__(self, pasteboard: Pasteboard) -> None:
         self._pb = pasteboard
@@ -115,15 +150,22 @@ class DarwinClipboardReader:
         if not utis:
             return None
         text = self._pb.stringForType_(UTI_STRING)
-        if not text:
+        rich: dict[str, str] = {}
+        for uti, legacy in TEXT_UTIS.items():
+            if uti in utis or legacy in utis:
+                value = self._pb.stringForType_(uti)
+                if value:
+                    rich[uti] = str(value)
+        if not text and not rich:
             # An image, a file promise, or an application-private flavour.
-            log.debug("clipboard holds no plain text (%d representation(s))", len(utis))
+            log.debug("clipboard holds no text (%d representation(s))", len(utis))
             return None
         return ClipboardEvent.of(
-            str(text),
+            str(text or ""),
             flavour=UTI_STRING,
             has_rich_flavours=has_rich_representations(utis),
             flavours=tuple(utis),
+            representations=rich,
         )
 
 
@@ -164,7 +206,7 @@ class DarwinClipboardWriter:
         try:
             self._pb.clearContents()
             results = [
-                bool(self._pb.setString_forType_(value, uti))
+                bool(self._pb.setString_forType_(pasteboard_form(uti, value), uti))
                 for uti, value in by_uti.items()
             ]
         except Exception as exc:  # noqa: BLE001
@@ -241,15 +283,17 @@ class DarwinClipboardMonitor:
             self._cancel(self._handle)
         self._handle = None
 
-    def note_own_write(self, text: str) -> None:
+    def note_own_write(self, text: str, representations: dict[str, str] | None = None) -> None:
         import time
 
         from . import content_hash
 
         # Same reason as on Linux: our own write is observed as a change, and
         # without this a redaction gets rescanned and a restore is instantly
-        # re-redacted, which makes the undo look broken.
-        self._own_writes[content_hash(text)] = time.monotonic() + 10.0
+        # re-redacted, which makes the undo look broken. Hashed in the form the
+        # writer hands over, since that is what the read will return.
+        written = {uti: pasteboard_form(uti, v) for uti, v in (representations or {}).items()}
+        self._own_writes[content_hash(text, written)] = time.monotonic() + 10.0
 
     # -- polling -----------------------------------------------------------
 
@@ -274,6 +318,8 @@ class DarwinClipboardMonitor:
             return
         if self._claim_own_write(event.digest):
             log.debug("ignoring our own clipboard write")
+            # Kept as the last value seen, so a clipboard manager re-asserting
+            # what we wrote is not taken for a new copy and redacted again.
             self._last_digest = event.digest
             return
         if event.digest == self._last_digest:
@@ -564,7 +610,11 @@ def _self_check() -> int:
     print(f"change count moved: {pb.changeCount()}")
 
     if before is not None:
-        writer.write(before.text)
+        if before.representations:
+            plain = {UTI_STRING: before.text} if before.text else {}
+            writer.write_flavours({**plain, **before.representations})
+        else:
+            writer.write(before.text)
         print("original restored")
     else:
         writer.clear()

@@ -18,18 +18,53 @@ supply its own run loop and IPC and reuse this file unchanged.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from . import config as config_mod
+from . import markup
 from .backend import Backend, ClipboardEvent, get_backend
-from .detector import Detector, load_default, summarise, value_hash
+from .detector import Detector, Finding, load_default, summarise, value_hash
+from .detector.engine import RULE_BUDGET_TIMEOUTS, SCAN_BUDGET_TIMEOUTS
 from .redactor import Redaction, RedactionStyle, redact
 
 log = logging.getLogger(__name__)
+
+# What a copy-time detection did to the clipboard, so a front end words its
+# notice from what happened rather than from the mode that was meant to happen.
+REMOVED = "removed"
+NOT_REMOVED = "not-removed"  # a redaction was due and the write failed
+LEFT = "left"  # the mode leaves the clipboard alone
+
+# Shared by the front ends, so every platform says the same thing.
+PARTLY_CHECKED_TITLE = "Clipboard not fully checked"
+PARTLY_CHECKED_BODY = (
+    "It was too large to check completely, so it may still contain a secret."
+)
+
+
+def _every_occurrence(
+    text: str, found: list[Finding], sources: dict[str, Finding]
+) -> list[Finding]:
+    """`found`, plus each verbatim occurrence in `text` of a value in `sources`
+    that none of `found` already covers."""
+    extra: list[Finding] = []
+    for value, source in sources.items():
+        start = text.find(value) if value else -1
+        while start != -1:
+            end = start + len(value)
+            if not any(f.start <= start and end <= f.end for f in found):
+                extra.append(
+                    dataclasses.replace(
+                        source, start=start, end=end, match_start=start, match_end=end
+                    )
+                )
+            start = text.find(value, start + 1)
+    return [*found, *extra] if extra else found
 
 
 class Timer(Protocol):
@@ -63,10 +98,30 @@ class HeldOriginal:
     digest: str
     expires_at: float
     labels: tuple[str, ...]
+    flavour: str = ""
+    representations: dict[str, str] = field(default_factory=dict)
+    # The digest of what replaced it, as the reader sees it. Restoring over
+    # anything else would destroy a newer copy.
+    replaced_by: str | None = None
 
     @property
     def alive(self) -> bool:
         return time.monotonic() < self.expires_at
+
+
+@dataclass
+class Sanitised:
+    """One clipboard value with its secrets removed from every representation."""
+
+    findings: list
+    # What the front end reports: the representation that lost the most secrets,
+    # with the labels of all of them.
+    result: Redaction
+    text: str
+    # Rich representations shown to be clean, to be written alongside `text`.
+    # Anything left out is dropped by the write, secret and all.
+    representations: dict[str, str]
+    hashes: tuple[str, ...]
 
 
 class Guard:
@@ -76,7 +131,10 @@ class Guard:
         *,
         backend: Backend | None = None,
         on_detection: Callable[[list, Redaction, ClipboardEvent], None] | None = None,
+        on_incomplete: Callable[[ClipboardEvent], None] | None = None,
         timer: Timer | None = None,
+        can_ask: bool = False,
+        can_restore: bool = True,
     ) -> None:
         self.config = config or config_mod.load()
         for warning in self.config._warnings:
@@ -86,6 +144,15 @@ class Guard:
         self.timer = timer or _NoTimer()
         # Injected by whatever front end exists; a headless guard has no presenter.
         self.on_detection = on_detection
+        # Told when a copy was not scanned in full, whatever was found in it,
+        # because otherwise the silence or the count reads as "checked".
+        self.on_incomplete = on_incomplete
+        # Whether the front end can put a question to the user. Without one, `ask`
+        # would leave the secret in place and ask nobody, so it runs as `redact`.
+        self.can_ask = can_ask
+        # Whether anything can offer "Restore original". Without that, holding the
+        # plaintext for the retention window is exposure with no use.
+        self.can_restore = can_restore
 
         # Set before the detector is built: building one reads the key.
         self._cached_exclusion_key: bytes | None = None
@@ -99,6 +166,7 @@ class Guard:
         self._held_handle: Any = None
         self._last_finding_count = 0
         self._last_secret_hashes: tuple[str, ...] = ()
+        self.last_outcome = LEFT
         self._injector = None
 
         # Installed last, deliberately: the gate reads `paused`, which needs
@@ -203,6 +271,12 @@ class Guard:
         )
 
     @property
+    def effective_mode(self) -> str:
+        """The mode as applied, which differs only for `ask` with nobody to ask."""
+        mode = self.config.mode
+        return "redact" if mode == "ask" and not self.can_ask else mode
+
+    @property
     def paused(self) -> bool:
         return time.monotonic() < self._paused_until
 
@@ -248,6 +322,10 @@ class Guard:
 
     def handle(self, event: ClipboardEvent) -> None:
         """React to a new clipboard value. Called by the monitor."""
+        # Whatever is held for an undo, and whatever "never flag this again"
+        # would exclude, belong to a value that has now been replaced.
+        self.forget_original()
+        self._last_secret_hashes = ()
         if self.config.mode == "off" or self.paused:
             return
         if self.locked:
@@ -257,39 +335,184 @@ class Guard:
             log.debug("session locked; ignoring clipboard change")
             return
 
-        findings = self.detector.scan(event.text)
-        self._last_finding_count = len(findings)
-        if not findings:
+        clean, incomplete = self._sanitise(event)
+        self._last_finding_count = len(clean.findings) if clean else 0
+        if clean is None:
+            if incomplete:
+                self._report_incomplete(event)
             return
 
-        info = summarise(findings)
+        info = summarise(clean.findings)
         # Content-free by construction: labels and counts only.
         log.info(
             "detected %s secret(s) on the clipboard: %s",
             info["secrets"],
-            ", ".join(info["labels"]),
+            ", ".join(clean.result.labels),
+        )
+        self._last_secret_hashes = clean.hashes
+
+        self.last_outcome = LEFT
+        if self.effective_mode == "redact":
+            # Replace first. This is what makes ignoring the dialog safe.
+            if self._write(clean.text, clean.representations, event.flavour):
+                self.last_outcome = REMOVED
+                self.hold_original(event, clean.result.labels)
+            else:
+                self.last_outcome = NOT_REMOVED
+                log.error("could not replace the clipboard; it still holds the secret")
+
+        if self.on_detection is not None:
+            self.on_detection(clean.findings, clean.result, event)
+        # Said even after a detection: "1 secret removed" alone reads as the
+        # whole copy having been checked. Once per copy, since the monitor
+        # reports neither our own write nor a re-assert of it.
+        if incomplete:
+            self._report_incomplete(event)
+
+    def _report_incomplete(self, event: ClipboardEvent) -> None:
+        log.warning("the clipboard was too large to check completely")
+        if self.on_incomplete is not None:
+            self.on_incomplete(event)
+
+    def _sanitise(self, event: ClipboardEvent) -> tuple[Sanitised | None, bool]:
+        """Redact every text-bearing representation of `event`, or None if clean,
+        and whether the copy, as the user will paste it, was scanned only in part.
+
+        A value found in any representation is redacted wherever it appears
+        verbatim in every one, plain text included: each is scanned on its own,
+        and a different context or a cut-off scan can miss in one what another
+        found.
+
+        A rich representation is kept only when its own scan accounts for every
+        secret the plain text had and none of the values found anywhere survive
+        in it: markup can split or escape a value so that scanning the source
+        misses what the rendered text shows. Otherwise it is dropped, which costs
+        formatting rather than safety.
+        """
+        style = self.redaction_style
+        # One budget for the copy rather than one per representation: on macOS
+        # the plain text, HTML and RTF are scanned one after another, on the
+        # thread the UI runs on. The plain text goes first, as what most targets
+        # paste; a representation left without time is only partly scanned.
+        deadline = time.monotonic() + self.config.regex_timeout * SCAN_BUDGET_TIMEOUTS
+        plain = self.detector.scan(event.text, deadline=deadline)
+        scanned = {
+            name: (value, self.detector.scan(value, deadline=deadline))
+            for name, value in event.representations.items()
+        }
+        # A representation scanned only in part still has its visible text
+        # checked, as the plain one; what that cannot show -- a link's address,
+        # a comment -- is checked here, so the unscanned tail of a large rich
+        # copy cannot pass a token as clean.
+        hidden = {
+            name: self._scan_hidden(name, value)
+            for name, (value, found) in scanned.items()
+            if event.text and getattr(found, "incomplete", False)
+        }
+        checked = [pair for pair in hidden.values() if pair is not None]
+        scans = [
+            plain,
+            *(found for _, found in scanned.values()),
+            *(found for _, found in checked),
+        ]
+        # Said from the plain text, which is what most targets paste: a Word or
+        # Excel copy's markup is routinely past the cap while its text is not.
+        # Beyond that, markup speaks through what its text cannot show, and
+        # whole when there is no text. A partly scanned representation is still
+        # never kept, so this is about the notice alone.
+        incomplete = (
+            getattr(plain, "incomplete", False)
+            or any(
+                pair is None or getattr(pair[1], "incomplete", False)
+                for pair in hidden.values()
+            )
+            if event.text
+            else any(getattr(found, "incomplete", False) for found in scans)
+        )
+        if not any(scans):
+            return None, incomplete
+
+        in_plain = {event.text[f.start : f.end] for f in plain}
+        # Each secret value, with a finding to attribute its other occurrences to.
+        sources: dict[str, Finding] = {}
+        for text, found in [(event.text, plain), *scanned.values(), *checked]:
+            for f in found:
+                sources.setdefault(text[f.start : f.end], f)
+        values = set(sources)
+
+        plain_found = _every_occurrence(event.text, plain, sources)
+        plain_result = redact(event.text, plain_found, style)
+        reports = [(plain_found, plain_result)] if plain_found else []
+        kept: dict[str, str] = {}
+        for name, (value, found) in scanned.items():
+            whole = not getattr(found, "incomplete", False)
+            found = _every_occurrence(value, found, sources)
+            result = redact(value, found, style)
+            if found:
+                reports.append((found, result))
+            covered = in_plain <= {value[f.start : f.end] for f in found}
+            if covered and whole and not any(v in result.text for v in values):
+                kept[name] = result.text
+            else:
+                log.info("dropping the %s representation; it cannot be shown clean", name)
+
+        # A value found only in the hidden parts in a form no representation
+        # holds verbatim -- unescaped from an attribute -- goes with the partly
+        # scanned representation that held it, so it is counted from those.
+        hidden_reports = [
+            (found, redact(text, found, style)) for text, found in checked if found
+        ]
+        findings, result = max(
+            reports or hidden_reports, key=lambda report: report[1].secrets_removed
+        )
+        labels = tuple(
+            dict.fromkeys(lb for _, r in [*reports, *hidden_reports] for lb in r.labels)
         )
         # Digests, not the values: this outlives the retention window, and
         # "never flag this again" only ever needs to compare.
         key = self._exclusion_key()
-        self._last_secret_hashes = (
-            tuple(value_hash(event.text[f.start : f.end], key) for f in findings)
-            if key is not None
-            else ()
+        return Sanitised(
+            findings=findings,
+            result=dataclasses.replace(result, labels=labels),
+            text=plain_result.text,
+            representations=kept,
+            hashes=(
+                tuple(value_hash(v, key) for v in sorted(values)) if key is not None else ()
+            ),
+        ), incomplete
+
+    def _scan_hidden(self, name: str, value: str) -> tuple[str, Any] | None:
+        """What `value` holds beyond its rendered text, and its scan; None when
+        that cannot be read, which leaves the copy partly checked."""
+        parts = markup.hidden_parts(
+            name, value, timeout=self.config.regex_timeout * RULE_BUDGET_TIMEOUTS
         )
+        if parts is None:
+            return None
+        # A budget of its own: this is what lets a partly scanned rich copy
+        # count as checked, and it is small next to the markup it came from.
+        return parts, self.detector.scan(parts)
 
-        result = redact(event.text, findings, self.redaction_style)
-
-        if self.config.mode == "redact":
-            # Replace first. This is what makes ignoring the dialog safe.
-            self.monitor.note_own_write(result.text)
-            if self.writer.write(result.text):
-                self.hold_original(event, result.labels)
-            else:
-                log.error("could not replace the clipboard; it still holds the secret")
-
-        if self.on_detection is not None:
-            self.on_detection(findings, result, event)
+    def _write(self, text: str, representations: dict[str, str], flavour: str) -> bool:
+        """Replace the whole clipboard with `text` and `representations`."""
+        # Announced only once it has landed, so a failed restore cannot leave the
+        # secret excused from the next scan. The monitor runs on this same loop,
+        # so it cannot observe the change in between.
+        write_flavours = getattr(self.writer, "write_flavours", None)
+        if representations and flavour and callable(write_flavours):
+            # Plain first: it is the one the writer's verdict rests on.
+            by_flavour = {flavour: text} if text else {}
+            by_flavour.update(representations)
+            if not write_flavours(by_flavour):
+                return False
+            self.monitor.note_own_write(text, representations)
+            return True
+        # A plain write replaces every representation, so a writer with no other
+        # to offer drops the rich ones, and any secret in them, with the rest.
+        if not self.writer.write(text):
+            return False
+        self.monitor.note_own_write(text)
+        return True
 
     def target_mode(self) -> tuple[str, str | None]:
         """The mode to apply to a paste happening now, and the target's identity.
@@ -321,31 +544,39 @@ class Guard:
         event = self._read_clipboard()
         if event is None:
             return 0
-        findings = self.detector.scan(event.text)
-        if not findings:
-            log.info("safe paste: clipboard is clean")
+        clean, incomplete = self._sanitise(event)
+        if clean is None:
+            if incomplete:
+                log.warning("safe paste: the clipboard was too large to check completely")
+            else:
+                log.info("safe paste: clipboard is clean")
             return 0
-        result = redact(event.text, findings, self.redaction_style)
-        self.monitor.note_own_write(result.text)
-        if not self.writer.write(result.text):
+        self._last_secret_hashes = clean.hashes
+        if not self._write(clean.text, clean.representations, event.flavour):
             return 0
-        self.hold_original(event, result.labels)
-        log.info("safe paste: removed %d secret(s)", result.secrets_removed)
+        self.hold_original(event, clean.result.labels)
+        log.info("safe paste: removed %d secret(s)", clean.result.secrets_removed)
         self._complete_paste()
-        return result.secrets_removed
+        return clean.result.secrets_removed
 
     # -- the retained original ---------------------------------------------
 
     def hold_original(self, event: ClipboardEvent, labels: tuple[str, ...]) -> None:
         self.forget_original()
         ttl = self.config.restore_timeout_secs
-        if ttl <= 0:
+        if ttl <= 0 or not self.can_restore:
             return
+        # Read back rather than computed: a backend may rewrite a representation
+        # on its way to the clipboard.
+        written = self._read_clipboard()
         self._held = HeldOriginal(
             text=event.text,
             digest=event.digest,
             expires_at=time.monotonic() + ttl,
             labels=labels,
+            flavour=event.flavour,
+            representations=dict(event.representations),
+            replaced_by=written.digest if written is not None else None,
         )
         self._held_handle = self.timer.schedule(ttl, self._on_hold_expired)
 
@@ -363,15 +594,20 @@ class Guard:
             # already have reached disk — the README says so rather than implying
             # a guarantee.
             self._held.text = ""
+            self._held.representations.clear()
             self._held = None
 
     def restore_original(self) -> bool:
         if self._held is None or not self._held.alive:
             log.info("no original available to restore")
             return False
-        text = self._held.text
-        self.monitor.note_own_write(text)
-        if not self.writer.write(text):
+        held = self._held
+        current = self._read_clipboard()
+        if current is None or current.digest != held.replaced_by:
+            log.info("the clipboard has changed since the redaction; not restoring over it")
+            self.forget_original()
+            return False
+        if not self._write(held.text, held.representations, held.flavour):
             return False
         log.info("restored the original clipboard value")
         self.forget_original()

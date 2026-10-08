@@ -24,14 +24,15 @@ log = logging.getLogger(__name__)
 
 MODE_LABELS = {
     "redact": "Redact automatically",
-    "ask": "Ask every time",
     "notify": "Notify only",
     "off": "Off",
 }
+# Nothing on Linux can ask, so `ask` runs as `redact` (Guard.can_ask) and is
+# shown as that rather than offered.
+SHOWN_MODES = tuple(mode for mode in MODES if mode in MODE_LABELS)
 
 MODE_DESCRIPTIONS = {
     "redact": "Replace secrets the moment they are copied, then offer to undo it.",
-    "ask": "Leave the original in place and ask what to do.",
     "notify": "Send a notification, but never change the clipboard.",
     "off": "Stop checking the clipboard entirely.",
 }
@@ -77,13 +78,12 @@ class PreferencesWindow(Adw.PreferencesWindow):
         )
         self.mode_row = Adw.ComboRow(title="Protection")
         model = Gtk.StringList()
-        for mode in MODES:
+        for mode in SHOWN_MODES:
             model.append(MODE_LABELS[mode])
         self.mode_row.set_model(model)
-        self.mode_row.set_selected(
-            MODES.index(self.config.mode) if self.config.mode in MODES else 0
-        )
-        self.mode_row.set_subtitle(MODE_DESCRIPTIONS[self.config.mode])
+        shown = self.config.mode if self.config.mode in SHOWN_MODES else "redact"
+        self.mode_row.set_selected(SHOWN_MODES.index(shown))
+        self.mode_row.set_subtitle(MODE_DESCRIPTIONS[shown])
         self.mode_row.connect("notify::selected", self._on_mode_changed)
         group.add(self.mode_row)
 
@@ -168,7 +168,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
     # -- handlers ----------------------------------------------------------
 
     def _on_mode_changed(self, row: Adw.ComboRow, _param) -> None:
-        mode = MODES[row.get_selected()]
+        mode = SHOWN_MODES[row.get_selected()]
         self.config.mode = mode
         row.set_subtitle(MODE_DESCRIPTIONS[mode])
         self._changed()

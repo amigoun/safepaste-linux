@@ -31,6 +31,7 @@ from safepaste.backend import (
 )
 from safepaste.backend.darwin import (
     UTI_HTML,
+    UTI_RTF,
     UTI_STRING,
     DarwinBackend,
     DarwinClipboardMonitor,
@@ -134,6 +135,35 @@ def test_reader_returns_none_when_there_is_no_plain_text() -> None:
     assert DarwinClipboardReader(board).read_text() is None
 
 
+def test_reader_carries_the_text_bearing_representations() -> None:
+    """HTML and RTF can hold what the plain text lacks, so both reach the guard."""
+    html = '<a href="https://ci.example/?t=1">report</a>'
+    board = FakePasteboard({UTI_STRING: "report", UTI_HTML: html, UTI_RTF: "{\\rtf1 report}"})
+    event = DarwinClipboardReader(board).read_text()
+    assert event is not None
+    assert event.representations == {UTI_HTML: html, UTI_RTF: "{\\rtf1 report}"}
+
+
+def test_an_html_only_pasteboard_is_still_read() -> None:
+    """macOS synthesises plain text from RTF but not from HTML."""
+    board = FakePasteboard({UTI_HTML: f"<p>GITHUB_TOKEN={SECRET}</p>"})
+    event = DarwinClipboardReader(board).read_text()
+    assert event is not None and event.text == ""
+    assert UTI_HTML in event.representations
+
+
+def test_same_text_over_different_markup_is_a_different_value() -> None:
+    """Two links with the same visible text must not be deduplicated as one copy."""
+    first = DarwinClipboardReader(
+        FakePasteboard({UTI_STRING: "report", UTI_HTML: '<a href="/a">report</a>'})
+    ).read_text()
+    second = DarwinClipboardReader(
+        FakePasteboard({UTI_STRING: "report", UTI_HTML: '<a href="/b">report</a>'})
+    ).read_text()
+    assert first is not None and second is not None
+    assert first.digest != second.digest
+
+
 # --- writer ---------------------------------------------------------------
 
 
@@ -167,6 +197,19 @@ def test_multi_flavour_write_keeps_both_representations(board: FakePasteboard) -
 
 def test_multi_flavour_write_rejects_nothing_to_write(board: FakePasteboard) -> None:
     assert DarwinClipboardWriter(board).write_flavours({}) is False
+
+
+def test_rich_representations_are_written_as_ascii() -> None:
+    """Pasted HTML without a charset is read as Latin-1, and RTF is 7-bit, so the
+    placeholder's ellipsis would arrive as mojibake. Measured on a real Mac."""
+    from safepaste.backend.darwin import pasteboard_form
+
+    assert pasteboard_form(UTI_HTML, "<b>a\u2026b</b>") == "<b>a&#8230;b</b>"
+    assert pasteboard_form(UTI_RTF, "{\\rtf1 a\u2026b}") == "{\\rtf1 a{\\uc1\\u8230?}b}"
+    # Outside the BMP, RTF wants a surrogate pair of signed 16-bit values.
+    assert pasteboard_form(UTI_RTF, "\U0001F511") == "{\\uc1\\u-10179?\\u-8943?}"
+    assert pasteboard_form(UTI_STRING, "a\u2026b") == "a\u2026b"
+    assert pasteboard_form(UTI_HTML, "<p>plain ascii</p>") == "<p>plain ascii</p>"
 
 
 # --- monitor: change-count polling ---------------------------------------
@@ -218,6 +261,20 @@ def test_identical_content_recopied_is_ignored(board: FakePasteboard) -> None:
     board.external_copy({UTI_STRING: PAYLOAD})  # same text, new count
     monitor.poll_once()
     assert len(seen) == 1
+
+
+def test_a_reassert_of_what_we_wrote_is_not_reported(board: FakePasteboard) -> None:
+    """Clipboard managers re-assert the value we wrote; that is not a new copy."""
+    seen: list[ClipboardEvent] = []
+    monitor = _monitor(board, seen)
+    writer = DarwinClipboardWriter(board)
+    writer.write(PAYLOAD)
+    monitor.note_own_write(PAYLOAD)
+    monitor.poll_once()
+
+    board.external_copy({UTI_STRING: PAYLOAD})
+    monitor.poll_once()
+    assert seen == []
 
 
 def test_a_genuinely_new_value_is_reported(board: FakePasteboard) -> None:
@@ -381,6 +438,135 @@ def test_the_whole_guard_pipeline_runs_on_the_darwin_backend(tmp_path, monkeypat
     guard.stop()
 
 
+def test_restore_does_not_overwrite_a_newer_copy(tmp_path, monkeypatch) -> None:
+    import safepaste.config as config_mod
+    from safepaste.guard import Guard
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = Guard(
+        config_mod.Config(mode="redact", restore_timeout_secs=60).validated(),
+        backend=DarwinBackend(pasteboard=board),
+    )
+    guard.start()
+    board.external_copy({UTI_STRING: PAYLOAD})
+    guard.monitor.poll_once()
+
+    board.external_copy({UTI_STRING: "the user's newer copy"})
+    assert guard.restore_original() is False, "unseen yet, but the pasteboard moved"
+    guard.monitor.poll_once()
+    assert guard.restore_original() is False
+    assert board.stringForType_(UTI_STRING) == "the user's newer copy"
+
+
+def test_a_clipboard_manager_reasserting_our_write_changes_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    """Re-asserting the redaction must not drop the undo or the never-flag
+    target, and re-asserting a restore must not redact it again."""
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
+    board.external_copy({UTI_STRING: PAYLOAD})
+    guard.monitor.poll_once()
+    redacted = board.stringForType_(UTI_STRING)
+    assert SECRET not in redacted
+    hashes = guard._last_secret_hashes
+
+    board.external_copy({UTI_STRING: redacted})
+    guard.monitor.poll_once()
+    assert guard._last_secret_hashes == hashes
+    assert guard.restore_original() is True
+    guard.monitor.poll_once()
+
+    board.external_copy({UTI_STRING: PAYLOAD})
+    guard.monitor.poll_once()
+    assert board.stringForType_(UTI_STRING) == PAYLOAD
+
+
+def _darwin_guard(tmp_path, monkeypatch, board: FakePasteboard, **cfg):
+    import safepaste.config as config_mod
+    from safepaste.guard import Guard
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+    cfg.setdefault("mode", "redact")
+    cfg.setdefault("restore_timeout_secs", 60)
+    guard = Guard(config_mod.Config(**cfg).validated(), backend=DarwinBackend(pasteboard=board))
+    assert guard.start() is True
+    return guard
+
+
+def _holds_secret(board: FakePasteboard) -> list[str]:
+    return [uti for uti in board.types() if SECRET in (board.stringForType_(uti) or "")]
+
+
+def test_a_secret_only_in_the_html_is_removed(tmp_path, monkeypatch) -> None:
+    """The plain text is a link's label; the token is in its URL.
+
+    Scanning the plain text alone called this clean and left the token on the
+    pasteboard for any application that pastes HTML.
+    """
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
+    html = f'<a href="https://ci.example/api?token={SECRET}">Download report</a>'
+    board.external_copy({UTI_STRING: "Download report", UTI_HTML: html})
+    guard.monitor.poll_once()
+
+    assert _holds_secret(board) == []
+    assert board.stringForType_(UTI_STRING) == "Download report"
+    assert "[REDACTED]" in (board.stringForType_(UTI_HTML) or ""), "the link is kept"
+
+
+def test_an_html_only_copy_is_scanned(tmp_path, monkeypatch) -> None:
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
+    board.external_copy({UTI_HTML: f"<p>GITHUB_TOKEN={SECRET}</p>"})
+    guard.monitor.poll_once()
+
+    assert _holds_secret(board) == []
+    assert "[REDACTED]" in (board.stringForType_(UTI_HTML) or "")
+
+
+def test_formatting_survives_a_redaction(tmp_path, monkeypatch) -> None:
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
+    board.external_copy(
+        {UTI_STRING: PAYLOAD, UTI_HTML: f"<pre>{PAYLOAD}</pre>", UTI_RTF: f"{{\\rtf1 {PAYLOAD}}}"}
+    )
+    guard.monitor.poll_once()
+
+    assert _holds_secret(board) == []
+    assert set(board.types()) == {UTI_STRING, UTI_HTML, UTI_RTF}
+    assert (board.stringForType_(UTI_HTML) or "").startswith("<pre>notes")
+
+    # The undo puts every representation back, and is not mistaken for a copy.
+    assert guard.restore_original() is True
+    assert board.stringForType_(UTI_HTML) == f"<pre>{PAYLOAD}</pre>"
+    guard.monitor.poll_once()
+    assert board.stringForType_(UTI_STRING) == PAYLOAD
+
+
+def test_markup_that_hides_the_secret_from_its_own_scan_is_dropped(
+    tmp_path, monkeypatch
+) -> None:
+    """Split by a tag, the token renders whole but scans as two harmless halves.
+
+    The plain text proves it is there, so a representation whose own scan cannot
+    account for it is dropped rather than trusted.
+    """
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    guard = _darwin_guard(tmp_path, monkeypatch, board)
+    html = f"<p>GITHUB_TOKEN={SECRET[:12]}<b></b>{SECRET[12:]}</p>"
+    board.external_copy({UTI_STRING: PAYLOAD, UTI_HTML: html})
+    guard.monitor.poll_once()
+
+    assert board.types() == [UTI_STRING], "the HTML could not be shown clean"
+    assert SECRET not in (board.stringForType_(UTI_STRING) or "")
+
+
 # --- the polling shell ----------------------------------------------------
 #
 # The macOS run loop. Tested here because it is only used by poll-driven
@@ -414,6 +600,145 @@ def test_polling_shell_redacts_and_notifies(tmp_path, monkeypatch) -> None:
     assert "GitHub PAT" in body
     # The notification itself must never carry the secret.
     assert SECRET not in title and SECRET not in body
+
+
+def test_polling_shell_ask_mode_swaps_first_and_holds_nothing(tmp_path, monkeypatch) -> None:
+    """There is no dialog here, so `ask` can only run as `redact`.
+
+    Leaving the secret in place while asking nobody is the outcome the fail-safe
+    default exists to prevent. And with no "Restore original" anywhere on this
+    shell, the plaintext is not kept around for one.
+    """
+    import safepaste.config as config_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    notes: list[tuple[str, str]] = []
+    shell = PollingShell(
+        config_mod.Config(mode="ask", restore_timeout_secs=60).validated(),
+        backend=DarwinBackend(pasteboard=board),
+        notify=lambda t, b: (notes.append((t, b)), True)[1],
+    )
+    shell.guard.start()
+    board.external_copy({UTI_STRING: PAYLOAD})
+    shell.guard.monitor.poll_once()
+
+    assert SECRET not in (board.stringForType_(UTI_STRING) or "")
+    assert "removed from the clipboard" in notes[0][0]
+    assert shell.guard._held is None
+
+
+def test_polling_shell_does_not_claim_a_removal_that_failed(tmp_path, monkeypatch) -> None:
+    """A redaction the pasteboard refused leaves the secret where it was."""
+    import safepaste.config as config_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    notes: list[tuple[str, str]] = []
+    shell = PollingShell(
+        config_mod.Config(mode="redact").validated(),
+        backend=DarwinBackend(pasteboard=board),
+        notify=lambda t, b: (notes.append((t, b)), True)[1],
+    )
+    shell.guard.start()
+    board.external_copy({UTI_STRING: PAYLOAD})
+    board.clearContents = lambda: (_ for _ in ()).throw(RuntimeError("denied"))  # type: ignore[method-assign]
+    shell.guard.monitor.poll_once()
+
+    assert board.stringForType_(UTI_STRING) == PAYLOAD
+    title, body = notes[0]
+    assert "could not be removed" in title
+    assert "removed from" not in title
+    assert "still holds" in body
+
+
+def test_polling_shell_says_when_a_copy_was_only_partly_checked(
+    tmp_path, monkeypatch
+) -> None:
+    import safepaste.config as config_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    class PartialScan(list):
+        incomplete = True
+        skipped_rules = ("generic-api-key",)
+        truncated = False
+
+    class PartialDetector:
+        def scan(self, _text: str, **_kw) -> PartialScan:
+            return PartialScan()
+
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    notes: list[tuple[str, str]] = []
+    shell = PollingShell(
+        config_mod.Config(mode="redact").validated(),
+        backend=DarwinBackend(pasteboard=board),
+        notify=lambda t, b: (notes.append((t, b)), True)[1],
+    )
+    shell.guard.start()
+    shell.guard.detector = PartialDetector()
+    board.external_copy({UTI_STRING: "a very large paste"})
+    shell.guard.monitor.poll_once()
+
+    assert board.stringForType_(UTI_STRING) == "a very large paste"
+    assert len(notes) == 1
+    title, body = notes[0]
+    assert "not fully checked" in title and "may still contain a secret" in body
+
+
+def test_polling_shell_says_once_when_a_copy_with_a_secret_was_partly_checked(
+    tmp_path, monkeypatch
+) -> None:
+    import safepaste.config as config_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    class PartialScan(list):
+        incomplete = True
+        skipped_rules = ("generic-api-key",)
+        truncated = False
+
+    board = FakePasteboard({UTI_STRING: "quiet"})
+    notes: list[tuple[str, str]] = []
+    shell = PollingShell(
+        config_mod.Config(mode="redact").validated(),
+        backend=DarwinBackend(pasteboard=board),
+        notify=lambda t, b: (notes.append((t, b)), True)[1],
+    )
+    shell.guard.start()
+    real = shell.guard.detector
+
+    class PartlyWithFindings:
+        def scan(self, text: str, **_kw) -> PartialScan:
+            return PartialScan(real.scan(text))
+
+    shell.guard.detector = PartlyWithFindings()
+    board.external_copy({UTI_STRING: PAYLOAD})
+    shell.guard.monitor.poll_once()
+
+    assert [t for t, _ in notes] == [
+        "1 secret removed from the clipboard",
+        "Clipboard not fully checked",
+    ]
+    for _ in range(3):
+        shell.guard.monitor.poll_once()
+    board.external_copy({UTI_STRING: board.stringForType_(UTI_STRING)})
+    shell.guard.monitor.poll_once()
+    assert len(notes) == 2, "a poll or a re-assert is not a new copy to warn about"
 
 
 def test_polling_shell_does_not_claim_removal_in_notify_mode(tmp_path, monkeypatch) -> None:
@@ -459,6 +784,96 @@ def test_polling_shell_refuses_a_non_poll_backend(tmp_path, monkeypatch) -> None
             backend=get_backend("linux"),
             notify=lambda _t, _b: True,
         )
+
+
+def test_a_raising_clipboard_check_does_not_stop_the_shell(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """One copy that breaks the guard must not end protection for every later one.
+
+    And a fault that recurs on every tick is logged once, not three times a second.
+    """
+    import logging
+
+    import safepaste.config as config_mod
+    import safepaste.shell as shell_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+    monkeypatch.setattr(shell_mod.signal, "signal", lambda *_a: None)
+
+    shell = PollingShell(
+        config_mod.Config(mode="redact").validated(),
+        backend=DarwinBackend(pasteboard=FakePasteboard({UTI_STRING: "quiet"})),
+        interval=0,
+        notify=lambda _t, _b: True,
+    )
+    monkeypatch.setattr(shell, "_attach_platform_extras", lambda: None)
+    polls: list[int] = []
+
+    def poll_once() -> None:
+        polls.append(1)
+        if len(polls) == 4:
+            shell.stop()
+        raise ValueError("exclusion key is not valid UTF-8")
+
+    monkeypatch.setattr(shell.guard.monitor, "poll_once", poll_once)
+    caplog.set_level(logging.ERROR, logger="safepaste.shell")
+
+    assert shell.run() == 0
+    assert len(polls) == 4, "the loop kept polling after the first failure"
+    assert len(caplog.records) == 1
+
+
+class _RecordingTray:
+    def __init__(self, **_callbacks) -> None:
+        self.states: list[tuple[str, bool]] = []
+
+    def start(self) -> bool:
+        return True
+
+    def stop(self) -> None:
+        pass
+
+    def set_state(self, mode: str, paused: bool) -> None:
+        self.states.append((mode, paused))
+
+    def set_alert(self, secrets: int, removed: bool | None = None) -> None:
+        pass
+
+    def clear_alert(self) -> None:
+        pass
+
+
+def test_the_tray_stops_saying_paused_when_the_pause_lapses(tmp_path, monkeypatch) -> None:
+    import time
+
+    import safepaste.config as config_mod
+    from safepaste.shell import PollingShell
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    tray = _RecordingTray()
+    backend = DarwinBackend(pasteboard=FakePasteboard({UTI_STRING: "quiet"}))
+    monkeypatch.setattr(backend, "tray", lambda **_cb: tray)
+    monkeypatch.setattr(backend, "hotkey_binder", lambda on_pressed=None: None)
+    shell = PollingShell(
+        config_mod.Config(mode="redact").validated(),
+        backend=backend,
+        notify=lambda _t, _b: True,
+    )
+    shell._attach_platform_extras()
+    shell._set_paused(True, 900)
+    assert tray.states[-1] == ("redact", True)
+
+    later = time.monotonic() + 901
+    monkeypatch.setattr(time, "monotonic", lambda: later)
+    shell.timer.run_due()
+    assert tray.states[-1] == ("redact", False)
 
 
 def test_sleep_timer_fires_due_callbacks_only() -> None:
@@ -519,7 +934,7 @@ def test_accelerator_translates_to_carbon_modifiers() -> None:
     # character, unlike Windows where the virtual-key code *is* the ASCII value.
     assert key == 0x09
 
-    assert parse_accelerator("<Shift>a")[0] & CARBON_SHIFT
+    assert parse_accelerator("<Shift><Control>a")[0] & CARBON_SHIFT
     assert parse_accelerator("<Command>v")[0] & CARBON_CMD
 
 
@@ -540,6 +955,7 @@ def test_accelerator_rejects_what_it_cannot_bind() -> None:
     from safepaste.backend.darwin_loop import parse_accelerator
 
     assert parse_accelerator("v") is None  # bare key: would grab it everywhere
+    assert parse_accelerator("<Shift>v") is None  # every capital V, everywhere
     assert parse_accelerator("") is None
     assert parse_accelerator("<Control>") is None
     assert parse_accelerator("<Nonsense>v") is None
@@ -579,11 +995,16 @@ def test_the_macos_menu_matches_the_other_platforms() -> None:
     assert QUIT_LABEL in labels
 
 
-def test_exactly_one_mode_is_checked_on_macos() -> None:
-    from safepaste.config import MODES
-
+def test_the_macos_menu_does_not_offer_ask() -> None:
+    """With no dialog to ask in, the choice would only ever redact."""
     tray = _darwin_tray()
-    for mode in MODES:
+    modes = [a["mode"] for k, _l, a in tray.build_menu_items() if k == "mode"]
+    assert modes == ["redact", "notify", "off"]
+
+
+def test_exactly_one_mode_is_checked_on_macos() -> None:
+    tray = _darwin_tray()
+    for mode in ("redact", "notify", "off"):
         tray.set_state(mode, False)
         checked = [a for k, _l, a in tray.build_menu_items() if k == "mode" and a.get("checked")]
         assert len(checked) == 1 and checked[0]["mode"] == mode
@@ -597,6 +1018,14 @@ def test_macos_status_line_does_not_claim_removal_in_other_modes() -> None:
     tray.set_state("notify", False)
     tray.set_alert(2)
     assert "found" in tray.build_menu_items()[0][1]
+
+
+def test_macos_status_line_does_not_claim_a_failed_removal() -> None:
+    tray = _darwin_tray()
+    tray.set_state("redact", False)
+    tray.set_alert(1, removed=False)
+    assert "found" in tray.build_menu_items()[0][1]
+    assert "still on" in tray._tooltip()
 
 
 def test_macos_symbol_follows_state() -> None:
@@ -697,7 +1126,7 @@ def test_every_refresh_reattaches_the_menu() -> None:
     tray._refresh()
     tray.set_state("redact", False)
     tray.set_alert(2)
-    tray.set_state("ask", False)
+    tray.set_state("notify", False)
 
     assert tray._item.calls == 4, "a refresh that does not reattach is a frozen menu"
 
@@ -710,8 +1139,8 @@ def test_every_refresh_reattaches_the_menu() -> None:
         for i in range(tray._item.menu_obj.numberOfItems())
         if tray._item.menu_obj.itemAtIndex_(i).state()
     ]
-    assert "Ask every time" in titles
-    assert checked == ["Ask every time"], "the tick must follow the mode"
+    assert "Notify only" in titles
+    assert checked == ["Notify only"], "the tick must follow the mode"
 
 
 @macos_only

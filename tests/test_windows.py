@@ -268,6 +268,19 @@ def test_our_own_write_is_not_reported_back(api: FakeWin32Clipboard) -> None:
     assert seen == []
 
 
+def test_a_reassert_of_what_we_wrote_is_not_reported(api: FakeWin32Clipboard) -> None:
+    """Clipboard managers re-assert the value we wrote; that is not a new copy."""
+    seen: list[ClipboardEvent] = []
+    monitor = _monitor(api, seen)
+    WindowsClipboardWriter(api, _nosleep).write(PAYLOAD)
+    monitor.note_own_write(PAYLOAD)
+    monitor.poll_once()
+
+    api.external_copy(PAYLOAD)
+    monitor.poll_once()
+    assert seen == []
+
+
 def test_identical_content_recopied_is_ignored(api: FakeWin32Clipboard) -> None:
     seen: list[ClipboardEvent] = []
     monitor = _monitor(api, seen)
@@ -513,6 +526,8 @@ def test_accelerator_parsing_rejects_what_it_cannot_honour() -> None:
 
     # A bare key would be grabbed from every application on the system.
     assert parse_accelerator("v") is None
+    # Shift alone is only a capital letter: this would swallow every V typed.
+    assert parse_accelerator("<Shift>v") is None
     assert parse_accelerator("") is None
     assert parse_accelerator("<Control>") is None
     assert parse_accelerator("<Nonsense>v") is None
@@ -576,14 +591,18 @@ def test_the_tray_menu_matches_the_linux_one() -> None:
         assert expected in labels, f"{expected!r} missing from the Windows tray menu"
 
 
-def test_exactly_one_mode_is_checked() -> None:
-    from safepaste.config import MODES
+def test_the_windows_menu_does_not_offer_ask() -> None:
+    """With no dialog to ask in, the choice would only ever redact."""
+    modes = [a["mode"] for k, _l, a in _tray().build_menu_items() if k == "mode"]
+    assert modes == ["redact", "notify", "off"]
 
+
+def test_exactly_one_mode_is_checked() -> None:
     tray = _tray()
-    for mode in MODES:
+    for mode in ("redact", "notify", "off"):
         tray.set_state(mode, False)
         modes = [a for k, _l, a in tray.build_menu_items() if k == "mode"]
-        assert len(modes) == len(MODES)
+        assert len(modes) == 3
         checked = [a for a in modes if a.get("checked")]
         assert len(checked) == 1 and checked[0]["mode"] == mode
 
@@ -613,6 +632,15 @@ def test_the_status_line_does_not_claim_removal_in_other_modes() -> None:
     tray.set_alert(2)
     status = tray.build_menu_items()[0][1]
     assert "found" in status and "removed" not in status
+
+
+def test_the_status_line_does_not_claim_a_failed_removal() -> None:
+    tray = _tray()
+    tray.set_state("redact", False)
+    tray.set_alert(1, removed=False)
+    status = tray.build_menu_items()[0][1]
+    assert "found" in status and "removed" not in status
+    assert "still on" in tray._tooltip()
 
 
 def test_the_tooltip_and_icon_follow_state() -> None:

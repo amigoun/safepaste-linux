@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import regex
@@ -34,6 +35,16 @@ from .rules import CATEGORY_LABELS, Rule, RuleSet, load_default
 # redactor because the detector is what has to recognise it: redactor imports
 # from this module, so the constant cannot live there without a cycle.
 DEFAULT_PLACEHOLDER = "[REDACTED]"
+
+
+def labelled_placeholder(placeholder: str, rule_ids: Iterable[str]) -> str:
+    """The placeholder naming the rules that fired: `[REDACTED:aws-access-token]`.
+
+    Built here, beside the code that recognises it, so the redactor's output
+    and the detector's idea of that output cannot drift apart.
+    """
+    return f"{placeholder.rstrip(']')}:{','.join(rule_ids)}]"
+
 
 # A placeholder shorter than this is not used to suppress anything. The check is
 # a substring test, so a one-character placeholder would match inside nearly
@@ -47,6 +58,37 @@ log = logging.getLogger(__name__)
 # all of it buys nothing and costs latency on every copy.
 DEFAULT_MAX_SCAN_BYTES = 1_048_576
 DEFAULT_REGEX_TIMEOUT = 0.25
+
+# Each rule runs over windows of the text rather than the whole of it, because
+# the timeout is per call: one call over a megabyte of ordinary log text can
+# blow the budget on cost alone, which skipped the rule and missed a key sitting
+# at the end. Windows keep every call small enough to finish. The overlap has to
+# hold the longest match worth finding whole -- a 4096-bit PEM key is ~3.3 KB --
+# since a match is only kept by the window it starts in.
+SCAN_WINDOW_CHARS = 65_536
+SCAN_WINDOW_OVERLAP = 8_192
+# How much further each window reads, for lookaheads only: a match starting
+# there still belongs to the next window. A lookahead cannot see past the end of
+# the scanned text, so a rule that checks for something below its match --
+# `kind: Secret` under a Secret's `data:`, past a long annotation -- failed
+# whenever that fell beyond the window.
+SCAN_READ_AHEAD = 32_768
+# What one rule may spend on one scan, in regex timeouts. The timeout is per
+# window, so without a cap across windows a rule slow on a megabyte could cost
+# a timeout per window -- per representation, on the thread the UI runs on.
+RULE_BUDGET_TIMEOUTS = 4
+# What a whole scan may spend, in regex timeouts. Per rule alone, the worst case
+# grew with the number of rules whose keywords appear. Rules not reached in time
+# are skipped and reported, as a rule over its own budget is.
+SCAN_BUDGET_TIMEOUTS = 8
+
+# Only these need the read-ahead; for every other rule it would be text read
+# twice to no purpose.
+_LOOKAHEAD = regex.compile(r"\(\?[=!]")
+# Gitleaks' keyword rules open on a run of name characters, so every position
+# is a start to try. They are the slow ones on a large paste, and they run after
+# the rules anchored on a token's own prefix, which a spent budget then spares.
+_LOOSE_START = regex.compile(r"^(?:\(\?[a-z]+\))?\[\\w\.-\]\{0,\d+\}")
 
 
 # Named in the digest itself, so a config file states which algorithm produced
@@ -109,6 +151,31 @@ class Finding:
         return CATEGORY_LABELS.get(self.category, self.category)
 
 
+class ScanResult(list[Finding]):
+    """Findings, plus whether they cover the whole input.
+
+    A list so that every caller written against `list[Finding]` keeps working.
+    The extra attributes exist because "no findings" is only a clean bill when
+    the scan was complete: a skipped rule or a truncated input can hide a secret,
+    and a caller that cannot tell would report that text as safe.
+    """
+
+    def __init__(
+        self,
+        findings: Iterable[Finding] = (),
+        *,
+        skipped_rules: Iterable[str] = (),
+        truncated: bool = False,
+    ) -> None:
+        super().__init__(findings)
+        self.skipped_rules: tuple[str, ...] = tuple(skipped_rules)
+        self.truncated = truncated
+
+    @property
+    def incomplete(self) -> bool:
+        return self.truncated or bool(self.skipped_rules)
+
+
 class Detector:
     def __init__(
         self,
@@ -152,6 +219,14 @@ class Detector:
         # placeholder too short to use means redacted text starts being flagged
         # again and nothing else would say why.
         self._suppress_placeholder = len(placeholder) >= MIN_SUPPRESSING_PLACEHOLDER
+        # The labelled form counts too, or `--label-rules` output is flagged
+        # on every rescan. Its prefix must clear the same length floor, or a
+        # placeholder that is mostly `]` would match any `:word]`.
+        labelled_prefix = labelled_placeholder(placeholder, [])[:-1]
+        forms = [regex.escape(placeholder)]
+        if len(labelled_prefix) > MIN_SUPPRESSING_PLACEHOLDER:
+            forms.append(regex.escape(labelled_prefix) + r"[^\s\]]+\]")
+        self._placeholder_pattern = regex.compile("|".join(forms))
         if placeholder and not self._suppress_placeholder:
             log.warning(
                 "placeholder %r is shorter than %d characters, so already-redacted "
@@ -160,7 +235,13 @@ class Detector:
                 placeholder,
                 MIN_SUPPRESSING_PLACEHOLDER,
             )
-        self._active = self.ruleset.enabled_for(categories)
+        self._active = sorted(
+            self.ruleset.enabled_for(categories),
+            key=lambda rule: bool(_LOOSE_START.match(_source(rule))),
+        )
+        self._looks_ahead = {
+            rule.id for rule in self._active if _LOOKAHEAD.search(_source(rule))
+        }
 
     @property
     def active_rules(self) -> list[Rule]:
@@ -177,15 +258,22 @@ class Detector:
         re-copying a sanitised URL raised a second dialog about a secret that
         was no longer there.
         """
-        return self._suppress_placeholder and self.placeholder in secret
+        return self._suppress_placeholder and bool(
+            self._placeholder_pattern.search(secret)
+        )
 
-    def _secret_span(self, m: regex.Match, rule: Rule) -> tuple[int, int] | None:
-        """Which slice of the match is the secret itself.
+    def _secret_spans(self, m: regex.Match, rule: Rule) -> list[tuple[int, int]]:
+        """Which slices of the match are the secret itself.
 
         Mirrors Gitleaks: an explicit `secretGroup` wins; otherwise, if the
         pattern has any capture group, group 1 *is* the secret. That convention
         is why `AWS_SECRET_ACCESS_KEY=wJal…` can be redacted to
         `AWS_SECRET_ACCESS_KEY=[REDACTED]` rather than losing the whole line.
+
+        Unlike Gitleaks, a group inside a repetition yields every capture rather
+        than only the last. That is what lets one match cover a whole block of
+        values -- every entry under a Kubernetes Secret's `data:` -- where Go's
+        engine can only ever report one of them.
         """
         # `or` would be wrong here: a rule that explicitly sets `secretGroup = 0`
         # (meaning "the secret is the whole match") is falsy, and `0 or fallback`
@@ -196,12 +284,12 @@ class Detector:
             else (1 if m.re.groups >= 1 else 0)
         )
         try:
-            span = m.span(group)
+            spans = m.spans(group)
         except (IndexError, regex.error):  # pragma: no cover - defensive
-            return None
-        if span == (-1, -1):  # group declared but did not participate
-            span = m.span(0)
-        return span if span[1] > span[0] else None
+            return []
+        if not spans:  # group declared but did not participate
+            spans = [m.span(0)]
+        return [span for span in spans if span[1] > span[0]]
 
     def _is_excluded(self, secret: str) -> bool:
         """Whether the user has said to stop flagging this exact value.
@@ -213,9 +301,18 @@ class Detector:
             return False
         return value_hash(secret, self.exclusion_key) in self.excluded_hashes
 
-    def scan(self, text: str) -> list[Finding]:
+    def _time_left(self, deadline: float) -> float:
+        """The timeout for a rule's next regex call, within its scan budget."""
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the rule's scan budget is spent")
+        return min(self.regex_timeout, left)
+
+    def scan(self, text: str, *, deadline: float | None = None) -> ScanResult:
+        """Find the secrets in `text`, within the scan budget and by `deadline`
+        (a `time.monotonic()` value) if given -- one budget for several scans."""
         if not text:
-            return []
+            return ScanResult()
 
         # Byte-budget the scan, but cut on a character boundary so offsets stay
         # valid for the caller's string. `text[:max_scan_bytes]` would slice by
@@ -234,77 +331,160 @@ class Detector:
             truncated = True
 
         lowered = text.lower()
+        windows = _windows(text, read_ahead=0)
+        reading_ahead = _windows(text)
         findings: list[Finding] = []
+        seen: set[tuple[str, int, int]] = set()
         timed_out: list[str] = []
         started = time.monotonic()
+        scan_deadline = started + self.regex_timeout * SCAN_BUDGET_TIMEOUTS
+        if deadline is not None:
+            scan_deadline = min(scan_deadline, deadline)
 
         for rule in self._active:
             if rule.keywords and not any(k in lowered for k in rule.keywords):
                 continue
+            matches: list[regex.Match] = []
+            rule_deadline = min(
+                time.monotonic() + self.regex_timeout * RULE_BUDGET_TIMEOUTS,
+                scan_deadline,
+            )
             try:
-                matches = list(rule.pattern.finditer(text, timeout=self.regex_timeout))
+                for pos, endpos, owned in (
+                    reading_ahead if rule.id in self._looks_ahead else windows
+                ):
+                    for m in rule.pattern.finditer(
+                        text, pos, endpos, timeout=self._time_left(rule_deadline)
+                    ):
+                        if m.start() >= owned:
+                            break
+                        if m.end() == endpos < len(text):
+                            # Running into the window's end may have cut it
+                            # short -- a base64 blob longer than a window --
+                            # so it is matched again against the rest of the
+                            # text, from the same start. No match there means
+                            # only the edge, read as the end of the text by
+                            # `$` or `\b`, made this one; and a timeout here
+                            # skips the rule like any other.
+                            m = rule.pattern.match(
+                                text, m.start(), timeout=self._time_left(rule_deadline)
+                            )
+                            if m is None:
+                                continue
+                        matches.append(m)
             except TimeoutError:
-                # A pathological input made this rule superlinear. Drop the rule
-                # for this scan rather than hang the clipboard.
+                # A pathological input made this rule superlinear, or it or the
+                # scan spent its budget. Drop it for the rest of this scan rather
+                # than hang the clipboard; whatever it found in earlier windows
+                # stands.
                 timed_out.append(rule.id)
-                continue
             except regex.error as exc:  # pragma: no cover - defensive
                 log.warning("rule %s failed at match time: %s", rule.id, exc)
                 continue
 
             for m in matches:
-                span = self._secret_span(m, rule)
-                if span is None:
-                    continue
-                secret = text[span[0] : span[1]]
-                # Our own output is not a finding. Checked against the secret
-                # span rather than the whole match on purpose: a placeholder
-                # elsewhere on the line must not excuse a real secret beside it.
-                if self._is_already_redacted(secret):
-                    continue
-                if not entropy_mod.passes(secret, rule.entropy):
-                    continue
-                if self._is_excluded(secret):
-                    continue
-                line = _line_containing(text, span[0])
-                whole = m.group(0)
-                if any(a.excludes(secret, whole, line) for a in rule.allowlists):
-                    continue
-                if any(
-                    a.excludes(secret, whole, line)
-                    for a in self.ruleset.global_allowlists
-                ):
-                    continue
-                findings.append(
-                    Finding(
-                        rule_id=rule.id,
-                        label=rule.label,
-                        category=rule.category,
-                        start=span[0],
-                        end=span[1],
-                        match_start=m.start(),
-                        match_end=m.end(),
-                        entropy=entropy_mod.shannon(secret) if rule.entropy else None,
+                for span in self._secret_spans(m, rule):
+                    # A match near a window edge can be found again, cut short,
+                    # by the next window; the secret span is what identifies it.
+                    key = (rule.id, span[0], span[1])
+                    if key in seen:
+                        continue
+                    secret = text[span[0] : span[1]]
+                    # Our own output is not a finding. Checked against the
+                    # secret span rather than the whole match on purpose: a
+                    # placeholder elsewhere on the line must not excuse a real
+                    # secret beside it.
+                    if self._is_already_redacted(secret):
+                        continue
+                    if not entropy_mod.passes(secret, rule.entropy):
+                        continue
+                    if self._is_excluded(secret):
+                        continue
+                    line = _line_containing(text, span[0])
+                    whole = m.group(0)
+                    if any(a.excludes(secret, whole, line) for a in rule.allowlists):
+                        continue
+                    if any(
+                        a.applies_to(rule.id) and a.excludes(secret, whole, line)
+                        for a in self.ruleset.global_allowlists
+                    ):
+                        continue
+                    seen.add(key)
+                    findings.append(
+                        Finding(
+                            rule_id=rule.id,
+                            label=rule.label,
+                            category=rule.category,
+                            start=span[0],
+                            end=span[1],
+                            match_start=m.start(),
+                            match_end=m.end(),
+                            entropy=(
+                                entropy_mod.shannon(secret) if rule.entropy else None
+                            ),
+                        )
                     )
-                )
 
         elapsed = time.monotonic() - started
         if timed_out:
             log.warning(
-                "%d rule(s) exceeded the %.0fms regex budget and were skipped: %s",
+                "%d rule(s) exceeded the %.0fms regex timeout, the %.0fms rule "
+                "budget or the scan's time and were skipped: %s",
                 len(timed_out),
                 self.regex_timeout * 1000,
+                self.regex_timeout * RULE_BUDGET_TIMEOUTS * 1000,
                 ", ".join(sorted(timed_out)),
             )
+        if truncated:
+            log.info(
+                "input exceeds the %d-byte scan cap; the rest was not scanned",
+                self.max_scan_bytes,
+            )
         log.debug(
-            "scanned %d chars in %.1fms, %d finding(s)%s",
+            "scanned %d chars in %d window(s), %.1fms, %d finding(s)",
             len(text),
+            len(windows),
             elapsed * 1000,
             len(findings),
-            " (input truncated to scan cap)" if truncated else "",
         )
         findings.sort(key=lambda f: (f.start, f.end, f.rule_id))
-        return findings
+        return ScanResult(
+            findings, skipped_rules=sorted(timed_out), truncated=truncated
+        )
+
+
+def _source(rule: Rule) -> str:
+    return getattr(rule.pattern, "pattern", "")
+
+
+def _windows(text: str, read_ahead: int = SCAN_READ_AHEAD) -> list[tuple[int, int, int]]:
+    r"""`(pos, endpos, owned)` per window: scan text[pos:endpos], keep matches
+    starting before `owned`.
+
+    Each window owns the stretch up to where the next begins and reads on for at
+    least the overlap past it, so a match no longer than the overlap is seen
+    whole by exactly one window. Past that it reads on a further `read_ahead`,
+    so that lookaheads see what follows a match near the seam. Boundaries fall
+    on line ends where one is near, because `^`, `$` and `\b` treat a window
+    edge as the edge of the text; a line longer than a window is cut mid-way,
+    and the overlap covers the seam.
+    Scanning with pos/endpos rather than slicing keeps offsets those of `text`
+    and lets lookbehinds see past the window's start.
+    """
+    n = len(text)
+    out: list[tuple[int, int, int]] = []
+    pos = 0
+    while n - pos > SCAN_WINDOW_CHARS:
+        limit = pos + SCAN_WINDOW_CHARS
+        stride = limit - SCAN_WINDOW_OVERLAP
+        newline = text.rfind("\n", pos, stride)
+        nxt = newline + 1 if newline > pos else stride
+        newline = text.rfind("\n", nxt + SCAN_WINDOW_OVERLAP - 1, limit)
+        endpos = newline + 1 if newline != -1 else limit
+        out.append((pos, min(n, endpos + read_ahead), nxt))
+        pos = nxt
+    out.append((pos, n, n))
+    return out
 
 
 def _line_containing(text: str, index: int) -> str:

@@ -18,6 +18,7 @@ place secret-shaped text legitimately leaves the process, already sanitised.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ from .detector import (
     Finding,
     Rule,
     RuleSet,
+    ScanResult,
     load_default,
     summarise,
     value_hash,
@@ -62,6 +64,9 @@ log = logging.getLogger(__name__)
 def _read_bytes(path: str) -> bytes:
     """Raw bytes from a path, or stdin when path is '-'."""
     if path == "-":
+        # Python sets sys.stdin to None when started with fd 0 closed (`<&-`).
+        if sys.stdin is None:
+            raise OSError(errno.EBADF, "standard input is closed")
         return sys.stdin.buffer.read()
     return pathlib.Path(path).read_bytes()
 
@@ -128,18 +133,76 @@ def _line_col(text: str, offset: int) -> tuple[int, int]:
 # --------------------------------------------------------------------------
 
 
+# flag dest -> (config.toml field, value under --no-config)
+_CONFIGURABLE_FLAGS = {
+    "timeout": ("regex_timeout", DEFAULT_REGEX_TIMEOUT),
+    "max_bytes": ("max_scan_bytes", DEFAULT_MAX_SCAN_BYTES),
+    "placeholder": ("placeholder", DEFAULT_PLACEHOLDER),
+    "label_rules": ("label_rules", False),
+    "keep_prefix": ("keep_prefix", DEFAULT_KEEP_PREFIX),
+    "keep_suffix": ("keep_suffix", DEFAULT_KEEP_SUFFIX),
+}
+
+
+def _load_config(args: argparse.Namespace) -> config_mod.Config | None:
+    """The daemon's config, unless --no-config; fills every flag left unset.
+
+    Filled in on `args` itself so that what `redact` builds from its flags
+    after the detector -- the placeholder, the kept prefix and suffix -- comes
+    out as the daemon would redact, not as the library defaults would.
+    """
+    cfg = None if args.no_config else config_mod.load()
+    for warning in cfg._warnings if cfg else ():
+        log.warning("config: %s", warning)
+    for dest, (key, builtin) in _CONFIGURABLE_FLAGS.items():
+        if getattr(args, dest, builtin) is None:
+            setattr(args, dest, getattr(cfg, key) if cfg else builtin)
+    return cfg
+
+
+def _scan_limit(value: str) -> int:
+    """--max-bytes, held to the floor config.toml has: a limit of zero scans
+    nothing and then exits 0, as if the input were clean."""
+    try:
+        limit = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    floor = config_mod.MIN_SCAN_BYTES
+    if limit < floor:
+        raise argparse.ArgumentTypeError(f"must be at least {floor}")
+    return limit
+
+
+def _rule_paths(
+    args: argparse.Namespace, cfg: config_mod.Config | None
+) -> list[pathlib.Path]:
+    # Config's rule files first, so a --rules file can retune one of them by id.
+    return (cfg.extra_rule_paths() if cfg else []) + (args.rule_paths or [])
+
+
 def _make_detector(args: argparse.Namespace) -> Detector:
-    """Build the Detector shared by scan/redact/rules from the global flags."""
-    ruleset = load_default(extra_paths=args.rule_paths)
-    categories = frozenset(args.categories) if args.categories else None
+    """Build the Detector shared by scan/redact from the flags and config.toml.
+
+    The same rules, categories and exclusions the daemon uses, so the CLI and
+    the clipboard never disagree about one input; a flag overrides its key.
+    """
+    cfg = _load_config(args)
+    if args.categories:
+        categories: frozenset[str] | None = frozenset(args.categories)
+    else:
+        categories = cfg.category_set if cfg else None
+    excluded = cfg.excluded_hash_set if cfg else frozenset()
     return Detector(
-        ruleset=ruleset,
+        ruleset=load_default(extra_paths=_rule_paths(args, cfg)),
         categories=categories,
+        excluded_hashes=excluded,
+        # Read, never minted: a scan has no reason to create a key.
+        exclusion_key=config_mod.load_exclusion_key() if excluded else None,
         regex_timeout=args.timeout,
         max_scan_bytes=args.max_bytes,
-        # `rules` and `hash` never scan, so they carry no placeholder; scan and
-        # redact both do, which is what makes `redact | scan` exit 0.
-        placeholder=getattr(args, "placeholder", DEFAULT_PLACEHOLDER),
+        # Scan and redact share the placeholder, which is what makes
+        # `redact | scan` exit 0.
+        placeholder=args.placeholder,
     )
 
 
@@ -159,6 +222,21 @@ def _finding_dict(finding: Finding, text: str) -> dict[str, object]:
         "line": line,
         "column": col,
     }
+
+
+def _incomplete_note(findings: ScanResult, max_bytes: int) -> str | None:
+    """One stderr line saying what a scan did not cover, or None if complete."""
+    if not findings.incomplete:
+        return None
+    reasons = []
+    if findings.skipped_rules:
+        reasons.append(
+            "rule(s) over the time budget and skipped: "
+            + ", ".join(findings.skipped_rules)
+        )
+    if findings.truncated:
+        reasons.append(f"input beyond {max_bytes} bytes not scanned")
+    return "safepaste: scan incomplete -- " + "; ".join(reasons)
 
 
 # --------------------------------------------------------------------------
@@ -196,10 +274,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 f"({f.length} chars, entropy {entropy_str})"
             )
 
+    note = _incomplete_note(findings, args.max_bytes)
+    if note:
+        print(note, file=sys.stderr)
+
     # However the findings were rendered above, the exit code always reflects
     # "was anything found" -- that is the one thing a shell composes on
-    # (`safepaste scan f && upload f`), independent of --json/--summary.
-    return 1 if findings else 0
+    # (`safepaste scan f && upload f`), independent of --json/--summary. An
+    # incomplete scan that found nothing has not shown the text is clean, so it
+    # exits 2 like unreadable input rather than 0.
+    if findings:
+        return 1
+    return 2 if note else 0
 
 
 # --------------------------------------------------------------------------
@@ -237,6 +323,9 @@ def cmd_redact(args: argparse.Namespace) -> int:
         )
     else:
         print("safepaste: no secrets found, output unchanged", file=sys.stderr)
+    note = _incomplete_note(findings, args.max_bytes)
+    if note:
+        print(note, file=sys.stderr)
 
     # "Exit 0 always unless the input could not be read" -- finding secrets is
     # the expected, successful case for this command, not a failure.
@@ -249,7 +338,9 @@ def cmd_redact(args: argparse.Namespace) -> int:
 
 
 def cmd_rules(args: argparse.Namespace) -> int:
-    ruleset = load_default(extra_paths=args.rule_paths)
+    # Custom rules are listed, but config's categories do not filter the list:
+    # this shows what is loaded, and an opt-in rule is still loaded.
+    ruleset = load_default(extra_paths=_rule_paths(args, _load_config(args)))
     categories = frozenset(args.categories) if args.categories else None
     rules = sorted(
         (r for r in ruleset.rules if categories is None or r.category in categories),
@@ -348,9 +439,9 @@ def _print_rule_stats(rules: list[Rule], ruleset: RuleSet, *, as_json: bool) -> 
 
 def cmd_hash(args: argparse.Namespace) -> int:
     try:
-        raw = sys.stdin.buffer.read()
+        raw = _read_bytes("-")
     except OSError as exc:
-        print(f"safepaste: cannot read stdin: {exc}", file=sys.stderr)
+        print(f"safepaste: cannot read stdin: {exc.strerror or exc}", file=sys.stderr)
         return 2
 
     text = _decode(raw)
@@ -363,7 +454,13 @@ def cmd_hash(args: argparse.Namespace) -> int:
     log.debug("hashing %d char(s) read from stdin", len(text))
     # Mints the key if this is the first thing on the machine to need one, so
     # that a hand-written exclusion and one added from the dialog agree.
-    print(value_hash(text, config_mod.ensure_exclusion_key()))
+    try:
+        key = config_mod.ensure_exclusion_key()
+    except OSError as exc:
+        # No digest at all beats one under a key nothing else will ever read.
+        print(f"safepaste: cannot keep an exclusion key: {exc}", file=sys.stderr)
+        return 2
+    print(value_hash(text, key))
     return 0
 
 
@@ -397,8 +494,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         choices=CATEGORIES,
         metavar="NAME",
-        help="restrict to this detection category (repeatable); default: all. "
-        "For `rules`, filters the listing instead of restricting a scan.",
+        help="restrict to this detection category (repeatable); default: the "
+        "categories enabled in config.toml, else all. For `rules`, filters the "
+        "listing instead of restricting a scan.",
     )
     common.add_argument(
         "--rules",
@@ -407,23 +505,33 @@ def _build_parser() -> argparse.ArgumentParser:
         type=pathlib.Path,
         metavar="PATH",
         help="extra Gitleaks-format TOML rule file, loaded after the bundled "
-        "set (repeatable)",
+        "set and config.toml's own (repeatable)",
     )
     common.add_argument(
         "--timeout",
         dest="timeout",
         type=float,
-        default=DEFAULT_REGEX_TIMEOUT,
         metavar="SECONDS",
-        help=f"per-rule regex timeout (default: {DEFAULT_REGEX_TIMEOUT})",
+        help="per-rule regex timeout (default: regex_timeout from config.toml, "
+        f"else {DEFAULT_REGEX_TIMEOUT})",
     )
     common.add_argument(
         "--max-bytes",
         dest="max_bytes",
-        type=int,
-        default=DEFAULT_MAX_SCAN_BYTES,
+        type=_scan_limit,
         metavar="N",
-        help=f"scan at most this many input bytes (default: {DEFAULT_MAX_SCAN_BYTES})",
+        help=f"scan at most this many input bytes, {config_mod.MIN_SCAN_BYTES} or "
+        "more (default: max_scan_bytes from config.toml, else "
+        f"{DEFAULT_MAX_SCAN_BYTES})",
+    )
+    # Not in `common`: `hash` has no settings to take from config.toml, and its
+    # key has to come from the config directory regardless.
+    uses_config = argparse.ArgumentParser(add_help=False)
+    uses_config.add_argument(
+        "--no-config",
+        action="store_true",
+        help="ignore config.toml and its custom rules and exclusions, which "
+        "are otherwise applied exactly as the daemon applies them",
     )
 
     epilog = textwrap.dedent(
@@ -457,8 +565,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     scan_p = subparsers.add_parser(
         "scan",
-        parents=[common],
-        help="find secrets in a file or stdin; exit 1 if any were found",
+        parents=[common, uses_config],
+        help="find secrets in a file or stdin; exit 1 if any were found, 2 if "
+        "the input could not be read or not all of it could be scanned",
     )
     scan_p.add_argument(
         "path", nargs="?", default="-", help="file to scan, or - for stdin (default)"
@@ -479,7 +588,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     redact_p = subparsers.add_parser(
         "redact",
-        parents=[common],
+        parents=[common, uses_config],
         help="write the redacted text to stdout; counts go to stderr",
     )
     redact_p.add_argument(
@@ -487,47 +596,47 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scan_p.add_argument(
         "--placeholder",
-        default=DEFAULT_PLACEHOLDER,
         metavar="TEXT",
         help="text that marks an already-redacted value, which is not reported "
-        "as a finding (default: %(default)s). Match this to the --placeholder "
-        "used by redact, or `scan` will flag your own sanitised output",
+        "as a finding (default: placeholder from config.toml, else "
+        f"{DEFAULT_PLACEHOLDER}). Match this to the --placeholder used by "
+        "redact, or `scan` will flag your own sanitised output",
     )
 
     redact_p.add_argument(
         "--placeholder",
-        default=DEFAULT_PLACEHOLDER,
         metavar="TEXT",
-        help=f"replacement text (default: {DEFAULT_PLACEHOLDER!r})",
+        help="replacement text (default: placeholder from config.toml, else "
+        f"{DEFAULT_PLACEHOLDER!r})",
     )
     redact_p.add_argument(
         "--label-rules",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         help="name the firing rule(s) in the placeholder, e.g. "
-        "[REDACTED:aws-access-token]",
+        "[REDACTED:aws-access-token] (default: label_rules from config.toml, "
+        "else off)",
     )
     redact_p.add_argument(
         "--keep-prefix",
         type=int,
-        default=DEFAULT_KEEP_PREFIX,
         metavar="N",
-        help="keep the first N characters of each secret (default: %(default)s; "
-        "0 to reveal nothing)",
+        help="keep the first N characters of each secret (default: keep_prefix "
+        f"from config.toml, else {DEFAULT_KEEP_PREFIX}; 0 to reveal nothing)",
     )
     redact_p.add_argument(
         "--keep-suffix",
         type=int,
-        default=DEFAULT_KEEP_SUFFIX,
         metavar="N",
-        help="keep the last N characters of each secret (default: %(default)s; "
-        "0 to reveal nothing). Both are lowered for a secret short enough that "
-        "honouring them would print most of it",
+        help="keep the last N characters of each secret (default: keep_suffix "
+        f"from config.toml, else {DEFAULT_KEEP_SUFFIX}; 0 to reveal nothing). "
+        "Both are lowered for a secret short enough that honouring them would "
+        "print most of it",
     )
     redact_p.set_defaults(func=cmd_redact)
 
     rules_p = subparsers.add_parser(
         "rules",
-        parents=[common],
+        parents=[common, uses_config],
         help="list loaded detection rules",
     )
     rules_p.add_argument(

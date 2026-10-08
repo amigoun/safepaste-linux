@@ -27,12 +27,16 @@ PAYLOAD = f"notes\nGITHUB_TOKEN={SECRET}\nmore notes\n"
 
 
 class FakeWriter:
-    def __init__(self, succeed: bool = True) -> None:
+    def __init__(self, succeed: bool = True, reader: FakeReader | None = None) -> None:
         self.succeed = succeed
         self.writes: list[str] = []
+        # Where a successful write becomes visible, as on a real clipboard.
+        self.reader = reader
 
     def write(self, text: str) -> bool:
         self.writes.append(text)
+        if self.succeed and self.reader is not None:
+            self.reader.event = ClipboardEvent.of(text)
         return self.succeed
 
     def clear(self) -> bool:
@@ -82,8 +86,8 @@ class FakeBackend(Backend):
     name = "fake"
 
     def __init__(self, *, write_succeeds: bool = True, locked: bool = False) -> None:
-        self.writer = FakeWriter(write_succeeds)
         self.reader = FakeReader()
+        self.writer = FakeWriter(write_succeeds, self.reader)
         self.monitor: FakeMonitor | None = None
         self.locks = FakeLocks(locked)
 
@@ -113,12 +117,16 @@ def guard_factory(tmp_path, monkeypatch):
             for k in ("write_succeeds", "locked")
             if k in cfg_kwargs
         }
+        guard_kwargs = {
+            k: cfg_kwargs.pop(k) for k in ("can_ask", "can_restore") if k in cfg_kwargs
+        }
         backend = FakeBackend(**backend_kwargs)
         events: list[tuple] = []
         guard = Guard(
             Config(**cfg_kwargs).validated(),
             backend=backend,
             on_detection=lambda f, r, e: events.append((f, r, e)),
+            **guard_kwargs,
         )
         return guard, backend, events
 
@@ -168,6 +176,23 @@ def test_a_failed_write_does_not_pretend_to_hold_an_original(guard_factory) -> N
     assert guard.restore_original() is False
 
 
+def test_a_failed_write_is_not_reported_as_a_removal(guard_factory) -> None:
+    """The front end words its notice from this; "removed" would be a lie."""
+    from safepaste.guard import LEFT, NOT_REMOVED, REMOVED
+
+    guard, _, events = guard_factory(mode="redact", write_succeeds=False)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert events and guard.last_outcome == NOT_REMOVED
+
+    guard, _, _ = guard_factory(mode="redact")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert guard.last_outcome == REMOVED
+
+    guard, _, _ = guard_factory(mode="notify")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert guard.last_outcome == LEFT
+
+
 def test_successful_write_retains_a_restorable_original(guard_factory) -> None:
     guard, backend, _ = guard_factory(mode="redact", restore_timeout_secs=60)
     guard.handle(ClipboardEvent.of(PAYLOAD))
@@ -190,6 +215,38 @@ def test_the_original_can_only_be_restored_once(guard_factory) -> None:
     guard.handle(ClipboardEvent.of(PAYLOAD))
     assert guard.restore_original() is True
     assert guard.restore_original() is False
+
+
+def test_restore_does_not_overwrite_a_newer_value(guard_factory) -> None:
+    """Paused, the guard never sees the next copy; the clipboard still says so."""
+    guard, backend, _ = guard_factory(mode="redact", restore_timeout_secs=60)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    backend.reader.event = ClipboardEvent.of("something copied since")
+    writes = len(backend.writer.writes)
+
+    assert guard.restore_original() is False
+    assert len(backend.writer.writes) == writes, "the newer value must survive"
+    assert guard._held is None, "and the secret is not kept for a later attempt"
+
+
+def test_a_new_copy_drops_the_held_original(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact", restore_timeout_secs=60)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert guard._held is not None
+
+    guard.handle(ClipboardEvent.of("an unrelated, clean copy"))
+    assert guard._held is None
+
+
+def test_a_failed_restore_does_not_excuse_the_secret(guard_factory) -> None:
+    """The monitor skips values announced as our own, so announcing the secret
+    before a write that then failed would let the next copy of it through."""
+    guard, backend, _ = guard_factory(mode="redact", restore_timeout_secs=60)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    backend.writer.succeed = False
+
+    assert guard.restore_original() is False
+    assert PAYLOAD not in backend.monitor.own_writes
 
 
 def test_zero_retention_means_no_undo_at_all(guard_factory) -> None:
@@ -233,6 +290,38 @@ def test_notify_mode_leaves_the_clipboard_alone(guard_factory) -> None:
     assert len(events) == 1, "but it must still report the detection"
 
 
+def test_ask_with_nobody_to_ask_runs_as_redact(guard_factory) -> None:
+    """A front end with no dialog cannot ask, so leaving the secret would be the
+    worst of both: still on the clipboard, and nobody told it needs a decision."""
+    guard, backend, events = guard_factory(mode="ask")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert backend.writer.writes and SECRET not in backend.writer.writes[-1]
+    assert guard.effective_mode == "redact"
+    assert len(events) == 1
+
+
+def test_ask_leaves_the_clipboard_to_a_front_end_that_can_ask(guard_factory) -> None:
+    guard, backend, events = guard_factory(mode="ask", can_ask=True)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert backend.writer.writes == []
+    assert guard.effective_mode == "ask"
+    assert len(events) == 1
+
+
+def test_no_plaintext_is_held_where_nothing_can_restore_it(guard_factory) -> None:
+    """Retention exists for "Restore original"; without that, it is only exposure."""
+    guard, backend, _ = guard_factory(
+        mode="redact", restore_timeout_secs=60, can_restore=False
+    )
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert SECRET not in backend.writer.writes[-1]
+    assert guard._held is None
+    assert guard.restore_original() is False
+
+
 def test_off_mode_does_nothing_at_all(guard_factory) -> None:
     guard, backend, events = guard_factory(mode="off")
     guard.handle(ClipboardEvent.of(PAYLOAD))
@@ -258,6 +347,22 @@ def test_a_locked_session_is_skipped(guard_factory) -> None:
     assert backend.writer.writes == [] and events == []
 
 
+def test_a_secret_in_a_rich_representation_alone_is_still_removed(guard_factory) -> None:
+    """A link's label can be clean while its URL carries the token.
+
+    This writer can offer plain text only, so the redaction replaces the rich
+    representation with that rather than leaving it behind.
+    """
+    guard, backend, events = guard_factory(mode="redact")
+    html = f'<a href="https://ci.example/?token={SECRET}">report</a>'
+    guard.handle(ClipboardEvent.of("report", representations={"text/html": html}))
+
+    assert backend.writer.writes == ["report"]
+    assert len(events) == 1
+    _findings, result, _event = events[0]
+    assert result.secrets_removed == 1 and "GitHub PAT" in result.labels
+
+
 def test_clean_text_is_left_untouched(guard_factory) -> None:
     guard, backend, events = guard_factory(mode="redact")
     guard.handle(ClipboardEvent.of("an entirely ordinary sentence"))
@@ -271,6 +376,239 @@ def test_a_backend_without_a_lock_watcher_still_works(guard_factory) -> None:
     guard.locks = None
     guard.handle(ClipboardEvent.of(PAYLOAD))
     assert SECRET not in backend.writer.writes[-1]
+
+
+class _PartialScan(list):
+    """What a detector returns when it could not scan the whole input."""
+
+    incomplete = True
+    skipped_rules: tuple[str, ...] = ()
+    truncated = True
+
+
+class _PartialDetector:
+    def scan(self, _text: str, **_kw) -> _PartialScan:
+        return _PartialScan()
+
+
+def test_a_partly_scanned_clean_copy_is_reported_not_passed(guard_factory) -> None:
+    """Saying nothing would read as "checked and clean", which it was not."""
+    guard, backend, events = guard_factory(mode="redact")
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.detector = _PartialDetector()
+    guard.handle(ClipboardEvent.of("a very large paste"))
+
+    assert len(told) == 1
+    assert backend.writer.writes == [], "nothing was found, so nothing is redacted"
+    assert events == []
+
+
+def test_a_partly_scanned_representation_is_not_kept(guard_factory) -> None:
+    """Its unscanned tail could hold anything, so it cannot be shown clean."""
+    guard, _, _ = guard_factory(mode="redact")
+    real = guard.detector
+
+    class HtmlPartly:
+        def scan(self, text: str, **_kw):
+            found = real.scan(text)
+            return _PartialScan(found) if text.startswith("<") else found
+
+    guard.detector = HtmlPartly()
+    html = f"<pre>{PAYLOAD}</pre>"
+    clean, _ = guard._sanitise(ClipboardEvent.of(PAYLOAD, representations={"text/html": html}))
+
+    assert clean is not None and clean.representations == {}
+
+
+def test_a_secret_found_only_in_the_markup_is_removed_from_the_plain_text_too(
+    guard_factory,
+) -> None:
+    """Each representation is scanned on its own, so a value can be found in
+    one and missed in another; wherever it appears verbatim, it goes."""
+    guard, backend, _ = guard_factory(mode="redact")
+    real = guard.detector
+
+    class PlainBlind:
+        def scan(self, text: str, **_kw):
+            return real.scan(text) if text.startswith("<") else real.scan("")
+
+    guard.detector = PlainBlind()
+    clean, _ = guard._sanitise(
+        ClipboardEvent.of(PAYLOAD, representations={"text/html": f"<pre>{PAYLOAD}</pre>"})
+    )
+
+    assert clean is not None
+    assert SECRET not in clean.text
+    assert "[REDACTED]" in clean.text
+    assert "text/html" in clean.representations
+
+    guard.handle(ClipboardEvent.of(PAYLOAD, representations={"text/html": f"<pre>{PAYLOAD}</pre>"}))
+    assert SECRET not in backend.writer.writes[-1]
+
+
+def test_a_partly_scanned_copy_with_a_finding_still_says_it_was_partly_checked(
+    guard_factory,
+) -> None:
+    """"1 secret removed" alone reads as the whole copy having been checked."""
+    guard, backend, events = guard_factory(mode="redact")
+    real = guard.detector
+
+    class PartlyWithFindings:
+        def scan(self, text: str, **_kw):
+            return _PartialScan(real.scan(text))
+
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.detector = PartlyWithFindings()
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert len(events) == 1 and len(told) == 1
+    assert SECRET not in backend.writer.writes[-1]
+
+
+def test_a_fully_scanned_clean_copy_says_nothing(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact")
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.handle(ClipboardEvent.of("an entirely ordinary sentence"))
+    assert told == []
+
+
+class _RichPartly:
+    """Scans plain text in full and markup only in part, as with a rich copy
+    whose HTML is past the scan cap while its text is not."""
+
+    def __init__(self, real) -> None:
+        self.real = real
+
+    def scan(self, text: str, **_kw):
+        found = self.real.scan(text)
+        return _PartialScan(found) if text.startswith("<") else found
+
+
+def test_an_oversized_rich_copy_with_clean_plain_text_says_nothing(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact")
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.detector = _RichPartly(guard.detector)
+    text = "an entirely ordinary sentence"
+    guard.handle(ClipboardEvent.of(text, representations={"text/html": f"<p>{text}</p>"}))
+    assert told == []
+
+
+def test_a_partly_scanned_markup_only_copy_is_reported(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact")
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    guard.detector = _RichPartly(guard.detector)
+    guard.handle(ClipboardEvent.of("", representations={"text/html": "<p>a large table</p>"}))
+    assert len(told) == 1
+
+
+def test_one_copy_shares_one_scan_deadline(guard_factory) -> None:
+    """On macOS the plain text, HTML and RTF are scanned one after another on
+    the UI thread, so a budget each would triple the worst case. What the markup
+    hides from its text has a budget of its own, being what lets a partly
+    scanned rich copy count as checked."""
+    guard, _, _ = guard_factory(mode="redact")
+    real = guard.detector
+    deadlines: list[float | None] = []
+
+    class Recording:
+        def scan(self, text: str, **kw):
+            deadlines.append(kw.get("deadline"))
+            found = real.scan(text, **kw)
+            return _PartialScan(found) if text.startswith("<") else found
+
+    guard.detector = Recording()
+    guard.handle(
+        ClipboardEvent.of(
+            PAYLOAD,
+            representations={"text/html": f"<pre>{PAYLOAD}</pre>", "public.rtf": "{\\rtf1 x}"},
+        )
+    )
+
+    shared, own = deadlines[:3], deadlines[3:]
+    assert shared[0] is not None and len(set(shared)) == 1
+    assert own == [None]
+
+
+# A rich copy whose markup is past the scan cap while its text is not: the
+# detector is the real one with a small cap, and formatting each word pushes
+# what follows out of the markup's own scan.
+SCAN_CAP = 4096
+FILLER_WORDS = "an ordinary quarterly figure " * 100
+
+
+def _past_the_cap(guard_factory, tail: str, *, name: str = "text/html"):
+    guard, backend, events = guard_factory(mode="redact")
+    guard.detector.max_scan_bytes = SCAN_CAP
+    told: list[ClipboardEvent] = []
+    guard.on_incomplete = told.append
+    words = FILLER_WORDS.split()
+    if "html" in name:
+        rich = "".join(f'<span class="body">{w} </span>' for w in words) + tail
+    else:
+        rich = r"{\rtf1\ansi " + "".join(rf"{{\f0\fs24 {w} }}" for w in words) + tail + "}"
+    text = f"{FILLER_WORDS}report"
+    assert len(text) < SCAN_CAP < rich.index(tail)
+    guard.handle(ClipboardEvent.of(text, representations={name: rich}))
+    return text, backend, events, told
+
+
+def test_a_token_in_a_link_past_the_scan_cap_is_removed(guard_factory) -> None:
+    text, backend, events, told = _past_the_cap(
+        guard_factory, f'<a href="https://ci.example/?token={SECRET}">report</a>'
+    )
+
+    assert backend.writer.writes == [text], "the markup holding it is dropped"
+    assert len(events) == 1 and "GitHub PAT" in events[0][1].labels
+    assert told == [], "what the text cannot show was checked in full"
+
+
+def test_a_clean_link_past_the_scan_cap_says_nothing(guard_factory) -> None:
+    _, backend, events, told = _past_the_cap(
+        guard_factory, '<a href="https://ci.example/?run=42">report</a>'
+    )
+    assert backend.writer.writes == [] and events == [] and told == []
+
+
+def test_a_token_held_only_escaped_in_the_markup_is_still_removed(guard_factory) -> None:
+    """Unescaped, the value is in no representation verbatim, so it is counted
+    from the markup's hidden parts and goes with the markup."""
+    text, backend, events, told = _past_the_cap(
+        guard_factory, '<a href="postgres://app:Xk9&amp;vQ2mL7pR4@db.internal/prod">db</a>'
+    )
+
+    assert backend.writer.writes == [text]
+    assert len(events) == 1 and events[0][1].secrets_removed == 1
+    assert told == []
+
+
+def test_a_token_in_an_rtf_link_past_the_scan_cap_is_removed(guard_factory) -> None:
+    link = (
+        r'{\field{\*\fldinst{HYPERLINK "https://ci.example/?token=' + SECRET
+        + r'"}}{\fldrslt report}}'
+    )
+    text, backend, events, told = _past_the_cap(guard_factory, link, name="public.rtf")
+
+    assert backend.writer.writes == [text]
+    assert len(events) == 1 and told == []
+
+
+def test_hidden_parts_too_large_to_scan_whole_say_partly_checked(guard_factory) -> None:
+    links = "".join(f'<a href="https://docs.example/page/{i}">p</a>' for i in range(400))
+    _, backend, events, told = _past_the_cap(guard_factory, links)
+    assert len(told) == 1 and backend.writer.writes == [] and events == []
+
+
+def test_markup_that_cannot_be_read_says_partly_checked(guard_factory, monkeypatch) -> None:
+    import safepaste.markup as markup
+
+    monkeypatch.setattr(markup, "hidden_parts", lambda *_a, **_k: None)
+    _, _, _, told = _past_the_cap(guard_factory, '<a href="https://ci.example/">r</a>')
+    assert len(told) == 1
 
 
 # --- on-demand path -------------------------------------------------------
@@ -315,6 +653,30 @@ def test_excluding_the_last_value_stops_it_being_flagged(guard_factory) -> None:
     before = len(backend.writer.writes)
     guard.handle(ClipboardEvent.of(PAYLOAD))
     assert len(backend.writer.writes) == before, "the excluded value must be ignored now"
+
+
+OTHER_SECRET = "ghp_Z9yX8wV7uT6sR5qP4oN3mL2kJ1iH0gF9eD8c"
+
+
+def test_excluding_after_a_safe_paste_excludes_what_it_redacted(guard_factory) -> None:
+    """The most recent detection is the safe paste's, not the copy before it."""
+    guard, backend, _ = guard_factory(mode="redact")
+    guard.handle(ClipboardEvent.of(f"TOKEN={OTHER_SECRET}"))
+    backend.reader.event = ClipboardEvent.of(PAYLOAD)
+    assert guard.safe_paste() == 1
+
+    assert guard.exclude_last_value() is True
+    assert guard.detector.scan(PAYLOAD) == []
+    assert guard.detector.scan(f"TOKEN={OTHER_SECRET}"), "the older value is not excluded"
+
+
+def test_a_newer_copy_leaves_nothing_to_exclude(guard_factory) -> None:
+    guard, _, _ = guard_factory(mode="redact")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    guard.handle(ClipboardEvent.of("an unrelated, clean copy"))
+
+    assert guard.exclude_last_value() is False
+    assert guard.detector.scan(PAYLOAD)
 
 
 def test_exclusions_store_digests_never_plaintext(guard_factory) -> None:

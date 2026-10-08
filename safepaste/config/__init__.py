@@ -18,6 +18,7 @@ import logging
 import os
 import pathlib
 import secrets
+import stat
 import sys
 import tempfile
 import tomllib
@@ -73,6 +74,10 @@ EXCLUSION_KEY_BYTES = 32
 DEFAULT_CATEGORIES = tuple(c for c in CATEGORIES if c != "high_entropy")
 
 MODES = ("redact", "ask", "notify", "off")
+
+# Below this a scan stops looking at all but the start of a paste, which reads
+# as "clean" rather than as a limit having been hit.
+MIN_SCAN_BYTES = 1024
 
 
 @dataclass
@@ -155,21 +160,29 @@ class Config:
             self.mode = "redact"
         unknown = [c for c in self.categories if c not in CATEGORIES]
         if unknown:
+            # Only consulted when needed: reading rule files on every load would
+            # cost the common case for the sake of a rare one.
+            custom = self.custom_categories()
+            unknown = [c for c in unknown if c not in custom]
+        if unknown:
             self._warnings.append(f"ignoring unknown categories: {', '.join(unknown)}")
-            self.categories = tuple(c for c in self.categories if c in CATEGORIES)
+            self.categories = tuple(c for c in self.categories if c not in unknown)
         if self.restore_timeout_secs < 0:
             self._warnings.append("restore_timeout_secs cannot be negative, using 60")
             self.restore_timeout_secs = 60
         if not 0.01 <= self.regex_timeout <= 10:
             self._warnings.append("regex_timeout out of range, using 0.25")
             self.regex_timeout = 0.25
-        if self.max_scan_bytes < 1024:
+        if self.max_scan_bytes < MIN_SCAN_BYTES:
             self._warnings.append("max_scan_bytes too small, using 1 MiB")
             self.max_scan_bytes = 1_048_576
         if self.keep_prefix < 0:
             self.keep_prefix = 0
         if self.keep_suffix < 0:
             self.keep_suffix = 0
+        if "" in self.extra_rule_globs:
+            self._warnings.append("ignoring an empty extra_rule_globs entry")
+            self.extra_rule_globs = tuple(g for g in self.extra_rule_globs if g)
         keyed = tuple(h for h in self.excluded_hashes if is_keyed_digest(h))
         unkeyed = len(self.excluded_hashes) - len(keyed)
         if unkeyed:
@@ -222,10 +235,41 @@ class Config:
                 return mode
         return self.mode
 
+    def custom_categories(self) -> frozenset[str]:
+        """Categories named by rules in the user's extra rule files.
+
+        A rule may carry any category, so one the user invents is as valid to
+        enable as a built-in one. Read with tomllib rather than the rule loader,
+        which would compile every regex just to learn a label; a file that does
+        not parse is skipped here and reported when the rules are loaded.
+        """
+        found: set[str] = set()
+        for path in self.extra_rule_paths():
+            try:
+                doc = tomllib.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                continue
+            rules = doc.get("rules")
+            for rule in rules if isinstance(rules, list) else ():
+                category = rule.get("category") if isinstance(rule, dict) else None
+                if isinstance(category, str):
+                    found.add(category)
+        return frozenset(found)
+
     def extra_rule_paths(self) -> list[pathlib.Path]:
         found: list[pathlib.Path] = []
         for pattern in self.extra_rule_globs:
-            found.extend(sorted(CONFIG_DIR.glob(pattern)))
+            # Relative to the config directory; an absolute or ~ pattern is
+            # globbed from its own anchor, since Path.glob refuses those outright.
+            try:
+                target = pathlib.Path(pattern).expanduser()
+                root, relative = CONFIG_DIR, pattern
+                if target.is_absolute():
+                    root = pathlib.Path(target.anchor)
+                    relative = str(target.relative_to(root))
+                found.extend(sorted(root.glob(relative)))
+            except (ValueError, RuntimeError, OSError) as exc:
+                log.warning("ignoring extra_rule_globs entry %r: %s", pattern, exc)
         return found
 
 
@@ -247,6 +291,42 @@ _SECTIONS = {
 POLICY_SECTION = "policy"
 
 
+_DEFAULTS = Config()
+_WRONG_TYPE = object()
+_TOML_TYPE_NAMES = {
+    bool: "true or false",
+    int: "a whole number",
+    float: "a number",
+    str: "a quoted string",
+    tuple: "a list of strings",
+}
+
+
+def _typed(value: object, default: object) -> object:
+    """`value` as the type of `default`, or _WRONG_TYPE if it is not one.
+
+    bool is checked before int because it is an int subclass: `keep_prefix =
+    true` is a mistake, not 1. An int is fine where a float is wanted, since
+    `regex_timeout = 1` is how most people would write one second.
+    """
+    if isinstance(default, bool):
+        return value if isinstance(value, bool) else _WRONG_TYPE
+    if isinstance(value, bool):
+        return _WRONG_TYPE
+    if isinstance(default, int):
+        return value if isinstance(value, int) else _WRONG_TYPE
+    if isinstance(default, float):
+        return float(value) if isinstance(value, (int, float)) else _WRONG_TYPE
+    if isinstance(default, str):
+        return value if isinstance(value, str) else _WRONG_TYPE
+    if isinstance(default, tuple):
+        # Every tuple field in the schema is a list of strings.
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            return tuple(value)
+        return _WRONG_TYPE
+    return _WRONG_TYPE  # pragma: no cover - a field type this schema lacks
+
+
 def load(path: pathlib.Path | None = None) -> Config:
     path = path or CONFIG_FILE
     if not path.exists():
@@ -260,25 +340,71 @@ def load(path: pathlib.Path | None = None) -> Config:
         return cfg
 
     known = {f.name for f in fields(Config) if not f.name.startswith("_")}
+    home = {key: section for section, keys in _SECTIONS.items() for key in keys}
     values: dict[str, object] = {}
+    # Everything skipped is reported through _warnings, because a typo that
+    # silently does nothing reads to the user as a setting that took effect.
+    ignored: list[str] = []
+    for name, block in doc.items():
+        if name in _SECTIONS or name == POLICY_SECTION:
+            if not isinstance(block, dict):
+                ignored.append(f"ignoring {name}: it must be a [{name}] section")
+        elif name in home:
+            ignored.append(
+                f"ignoring top-level key {name}: it belongs under [{home[name]}]"
+            )
+        elif isinstance(block, dict):
+            ignored.append(f"ignoring unknown section [{name}]")
+        else:
+            ignored.append(f"ignoring unknown top-level key {name}")
+
     for section, keys in _SECTIONS.items():
         block = doc.get(section) or {}
         if not isinstance(block, dict):
             continue
         for key, value in block.items():
             if key not in known or key not in keys:
-                log.warning("ignoring unknown config key [%s].%s", section, key)
+                where = f", it belongs under [{home[key]}]" if key in home else ""
+                ignored.append(f"ignoring unknown key [{section}].{key}{where}")
                 continue
-            # Tuple-typed fields arrive as TOML arrays.
-            values[key] = tuple(value) if isinstance(value, list) else value
+            # A value of the wrong type keeps that key's default rather than
+            # reaching validated(), which assumes the type is right.
+            default = getattr(_DEFAULTS, key)
+            typed = _typed(value, default)
+            if typed is _WRONG_TYPE:
+                ignored.append(
+                    f"ignoring [{section}].{key}: it should be "
+                    f"{_TOML_TYPE_NAMES[type(default)]}, so the default applies"
+                )
+                continue
+            values[key] = typed
 
     policy = doc.get(POLICY_SECTION) or {}
     if isinstance(policy, dict):
         values["app_modes"] = tuple(
-            (str(app), str(mode)) for app, mode in policy.items()
+            (app, str(mode)) for app, mode in _dotted(policy)
         )
 
-    return Config(**values).validated()  # type: ignore[arg-type]
+    cfg = Config(**values)  # type: ignore[arg-type]
+    cfg._warnings.extend(ignored)
+    return cfg.validated()
+
+
+def _dotted(table: dict, prefix: str = "") -> list[tuple[str, object]]:
+    """A [policy] table as (identity, mode) pairs, with nested tables re-joined.
+
+    A bundle identifier written unquoted -- `com.agilebits.onepassword7 = "off"`
+    -- is a dotted key to TOML and arrives as nested tables. Joining the path
+    back up recovers the identifier the user typed.
+    """
+    pairs: list[tuple[str, object]] = []
+    for key, value in table.items():
+        name = f"{prefix}{key}"
+        if isinstance(value, dict):
+            pairs.extend(_dotted(value, f"{name}."))
+        else:
+            pairs.append((name, value))
+    return pairs
 
 
 def save(cfg: Config, path: pathlib.Path | None = None) -> None:
@@ -353,21 +479,24 @@ def exclusion_key_path(config_path: pathlib.Path | None = None) -> pathlib.Path:
 def load_exclusion_key(config_path: pathlib.Path | None = None) -> bytes | None:
     """The machine-local exclusion key, or None if there is not one yet.
 
-    Never creates anything -- a read is a read. Every failure here returns None,
-    which fails in the safe direction: exclusions stop matching, so values get
-    flagged again rather than being waved through on a digest nothing can verify.
+    Never creates anything -- a read is a read -- though it does take back
+    permissions that were loosened on the key or its directory. Every failure
+    here returns None, which fails in the safe direction: exclusions stop
+    matching, so values get flagged again rather than being waved through on a
+    digest nothing can verify.
     """
     path = exclusion_key_path(config_path)
     try:
-        raw = path.read_text(encoding="utf-8").strip()
+        raw = path.read_bytes()
     except FileNotFoundError:
         return None
     except OSError as exc:
         log.error("cannot read the exclusion key at %s (%s)", path, exc)
         return None
+    _restrict_to_owner(path)
     try:
-        key = bytes.fromhex(raw)
-    except ValueError:
+        key = bytes.fromhex(raw.decode("ascii").strip())
+    except ValueError:  # UnicodeDecodeError included
         log.error("the exclusion key at %s is not hex; exclusions cannot match", path)
         return None
     if len(key) < EXCLUSION_KEY_BYTES:
@@ -381,6 +510,30 @@ def load_exclusion_key(config_path: pathlib.Path | None = None) -> bytes | None:
     return key
 
 
+def _restrict_to_owner(path: pathlib.Path) -> None:
+    """Put the key back to 0600 and its directory to 0700 if either was widened.
+
+    Checked on every read, not only at creation, because a key restored from a
+    backup or copied from another machine arrives with whatever mode the copy
+    gave it. Windows has no such modes to check.
+    """
+    if sys.platform == "win32":
+        return
+    for target, mode in ((path, 0o600), (path.parent, 0o700)):
+        try:
+            if stat.S_IMODE(target.stat().st_mode) & 0o077:
+                os.chmod(target, mode)
+                log.warning(
+                    "%s was open to other users; restricted it to %o", target, mode
+                )
+        except OSError as exc:
+            log.warning("cannot restrict %s to its owner (%s)", target, exc)
+
+
+class ExclusionKeyError(OSError):
+    """There is a key file, and it cannot be used or replaced."""
+
+
 def ensure_exclusion_key(config_path: pathlib.Path | None = None) -> bytes:
     """The machine-local exclusion key, minting one on first use.
 
@@ -391,6 +544,9 @@ def ensure_exclusion_key(config_path: pathlib.Path | None = None) -> bytes:
     would let the loser overwrite it instead, silently invalidating every
     exclusion the winner had just written. It also means no reader ever sees a
     half-written key.
+
+    Raises OSError when no usable key can be kept on disk, ExclusionKeyError
+    when that is because an unusable one is already there.
     """
     existing = load_exclusion_key(config_path)
     if existing is not None:
@@ -423,11 +579,15 @@ def ensure_exclusion_key(config_path: pathlib.Path | None = None) -> bytes:
         tmp.unlink()
 
     won = load_exclusion_key(config_path)
-    if won is None:  # pragma: no cover - the directory went away under us
-        log.error(
-            "could not persist an exclusion key at %s; exclusions will not stick", path
+    if won is None:
+        # Raised rather than handing back the key just minted: nothing on disk
+        # holds it, so every digest made with it would match only until exit.
+        # The unusable file is left alone; replacing it is the user's call.
+        raise ExclusionKeyError(
+            f"the exclusion key at {path} is unusable; move it aside and a new "
+            "one will be created (exclusions made with the old one will need "
+            "adding again)"
         )
-        return key
     if won != key:
         log.info("another process created the exclusion key first; using that one")
     else:

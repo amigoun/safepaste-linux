@@ -189,7 +189,6 @@ _PROP_SIG: dict[str, str] = {
 
 _MODE_LABELS: dict[str, str] = {
     "redact": "Redact automatically",
-    "ask": "Ask every time",
     "notify": "Notify only",
     "off": "Off",
 }
@@ -201,13 +200,11 @@ _MODE_LABELS: dict[str, str] = {
 # not have.
 _MODE_STATUS: dict[str, str] = {
     "redact": "Protected",
-    "ask": "Protected (asks first)",
     "notify": "Notify only",
     "off": "Protection off",
 }
 _MODE_TOOLTIP: dict[str, str] = {
     "redact": "Protected — redacting automatically",
-    "ask": "Protected — asks before redacting",
     "notify": "Notify only",
     "off": "Protection off",
 }
@@ -230,7 +227,7 @@ class TrayIndicator:
     _ID_SAFE_PASTE = 3
     _ID_SEP_2 = 4
     _ID_PROTECTION = 5
-    _ID_MODE_BASE = 6  # + enumerate(MODES): redact=6, ask=7, notify=8, off=9
+    _ID_MODE_BASE = 6  # + enumerate(MODES): redact=6, ask=7 (not shown), notify=8, off=9
     _ID_PAUSE_15 = 10
     _ID_PAUSE_60 = 11
     _ID_RESUME = 12
@@ -268,6 +265,7 @@ class TrayIndicator:
         self._mode = "redact"
         self._paused = False
         self._alert_secrets: int | None = None
+        self._alert_removed: bool | None = None
         self._revision = 1  # dbusmenu layout revision; 0 would mean "never set"
         # What the host has actually been given, as of its last GetLayout. The
         # revision answers AboutToShow ("is what you hold stale?"); the id set
@@ -390,21 +388,32 @@ class TrayIndicator:
         if mode not in MODES:
             log.warning("tray: ignoring unknown mode %r", mode)
             return
+        # Nothing on Linux can ask, so `ask` runs as `redact` (Guard.can_ask)
+        # and is shown as what it does rather than offered as a choice.
+        if mode == "ask":
+            mode = "redact"
         if (mode, paused) == (self._mode, self._paused):
             return
         self._mode = mode
         self._paused = paused
         self._notify_change()
 
-    def set_alert(self, secrets: int) -> None:
+    def set_alert(self, secrets: int, removed: bool | None = None) -> None:
         """Show a transient "secrets were just found" state.
 
         Overlays the status line/icon/tooltip until `clear_alert()`; it does
         not touch `mode`/`paused`, so the Protection submenu's radio tick and
-        the Resume item's visibility stay accurate underneath it.
+        the Resume item's visibility stay accurate underneath it. `removed`
+        None infers the outcome from the mode.
         """
         self._alert_secrets = secrets
+        self._alert_removed = removed
         self._notify_change()
+
+    def _alert_was_removed(self) -> bool:
+        if self._alert_removed is not None:
+            return self._alert_removed
+        return self._mode == "redact"
 
     def clear_alert(self) -> None:
         """End the transient alert state, reverting to mode/paused display."""
@@ -626,10 +635,10 @@ class TrayIndicator:
         if self._alert_secrets is not None:
             n = self._alert_secrets
             noun = "secret" if n == 1 else "secrets"
-            # Only "redact" mode actually changes the clipboard. Saying "removed"
-            # in ask/notify mode would be a plain untruth: the secret is still
-            # sitting there, which is precisely what the user needs to know.
-            verb = "removed" if self._mode == "redact" else "found"
+            # Only a redaction that landed changes the clipboard. Saying "removed"
+            # after a failed one, or in ask/notify mode, would be a plain untruth:
+            # the secret is still sitting there, which is what the user needs to know.
+            verb = "removed" if self._alert_was_removed() else "found"
             return f"{n} {noun} {verb}"
         if self._paused:
             return "Paused"
@@ -644,7 +653,7 @@ class TrayIndicator:
         if self._alert_secrets is not None:
             n = self._alert_secrets
             noun = "secret" if n == 1 else "secrets"
-            if self._mode == "redact":
+            if self._alert_was_removed():
                 return f"{n} {noun} removed from the clipboard"
             return f"{n} {noun} still on the clipboard"
         if self._paused:
@@ -737,6 +746,7 @@ class TrayIndicator:
                 "children": [],
             }
             for index, mode in enumerate(MODES)
+            if mode != "ask"
         ]
 
         return {

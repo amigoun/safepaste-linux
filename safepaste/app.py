@@ -23,6 +23,7 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from . import config as config_mod, hardening
 from .daemon import Daemon
+from .guard import NOT_REMOVED, PARTLY_CHECKED_BODY, PARTLY_CHECKED_TITLE, REMOVED
 from .ui.dialog import present_detection
 
 log = logging.getLogger(__name__)
@@ -46,10 +47,16 @@ class SafePasteApp(Adw.Application):
         self.daemon = Daemon(
             self.config,
             on_detection=self._on_detection,
+            on_incomplete=lambda _event: self._notify_simple(
+                PARTLY_CHECKED_TITLE, PARTLY_CHECKED_BODY
+            ),
             # So the tray follows the daemon's state rather than only the changes
             # made through the tray: a pause over D-Bus used to leave the menu
             # claiming to be guarding.
             on_state_changed=self._refresh_tray,
+            # The dialog reports a redaction and offers the undo; it has no form
+            # that leaves the secret and asks, so `ask` redacts here too.
+            can_ask=False,
         )
         self.tray = None
         self._prefs_window = None
@@ -140,10 +147,10 @@ class SafePasteApp(Adw.Application):
 
     # -- the transient detection notice ------------------------------------
 
-    def _show_alert(self, secrets: int) -> None:
+    def _show_alert(self, secrets: int, removed: bool) -> None:
         if self.tray is None:
             return
-        self.tray.set_alert(secrets)
+        self.tray.set_alert(secrets, removed=removed)
         # Expire it. `clear_alert()` had no caller anywhere, so one detection left
         # the tray reading "1 secret removed" -- and reporting NeedsAttention -- for
         # the rest of the session.
@@ -195,7 +202,17 @@ class SafePasteApp(Adw.Application):
     def _on_detection(self, findings: list, result, event) -> None:
         """Called by the daemon after a scan that found something."""
         secrets = result.secrets_removed if result.changed else len(findings)
-        self._show_alert(secrets)
+        outcome = self.daemon.guard.last_outcome
+        self._show_alert(secrets, removed=outcome == REMOVED)
+
+        if outcome == NOT_REMOVED:
+            # The dialog reports a completed redaction; this one did not happen.
+            noun = "secret" if secrets == 1 else "secrets"
+            self._notify_simple(
+                f"{secrets} {noun} could not be removed",
+                "The clipboard still holds the original. Do not paste it.",
+            )
+            return
 
         mode = self.config.mode
         if mode == "notify":

@@ -22,16 +22,31 @@ regexes = [
     # Obvious placeholders. Kept anchored so they only fire on the whole secret,
     # never as a substring of a real key.
     '''(?i)^(?:changeme|change_me|placeholder|redacted|hidden|removed)$''',
-    '''(?i)^(?:your|my|the)[_-]?(?:api)?[_-]?(?:key|token|secret|password)$''',
     '''(?i)^(?:x{4,}|y{4,}|z{4,}|\*{4,}|\.{4,}|_{4,}|-{4,}|0{4,})$''',
-    '''(?i)^(?:insert|enter|add|paste)[_-]?(?:your)?[_-]?\w{0,20}$''',
-    '''(?i)^(?:test|dummy|sample|fake|mock|example)[_-]?\w{0,12}$''',
-    '''(?i)^(?:lorem|ipsum|foobar|foo|bar|baz|qux)\w{0,12}$''',
+    # Made only of placeholder words -- `test`, `foobar`, `your_api_key`,
+    # `enter-token-here` -- and nothing else, led by a word that marks a
+    # placeholder. `my`, `the` and a trailing number are how real weak passwords
+    # are built (MyPassword123, mysecret2024), so they lead nothing and end
+    # nothing; `test` and `mock` lead only as whole words, for Testarossa and
+    # testkey. A word plus any tail is not enough either: as prefixes, `foo`,
+    # `bar` and `enter` excused Football2024, Barcelona1992 and
+    # Enterprise2024Prod. Atomic and possessive so the split into words cannot
+    # backtrack, longest word first wherever one is a prefix of another.
+    '''(?i)^(?>your|examples?|sample|dummy|fake|placeholder|change[_-]?me|enter|insert|paste|add|replace|x{3,}|foobar|foo|bar|baz|quux|qux|lorem|ipsum|testing|(?:test|mock)(?![a-z0-9]))(?:[_-]?(?>testing|test|dummy|sample|fake|mock|example|lorem|ipsum|dolor|foo|bar|baz|quux|qux|your|my|the|own|real|actual|new|here|goes|api|access|auth|secret|keys|key|token|password|passwd|pass|pwd|credentials|credential|value|string|data|user|client|app|private|public|id))*+$''',
     # Values that are plainly a reference to a secret rather than one.
     '''^\$(?:\w+|\{\w+\}|\(\w+\))$''',
     '''^(?:process\.env|os\.environ|ENV)\[?[\w'".\]]+$''',
     '''^<[\w\s-]{1,40}>$''',
-    # A pasted git object or UUID is not a credential.
+]
+
+[[allowlists]]
+description = "identifiers that are not credentials, to the catch-all rules"
+# A pasted git object or UUID is not a credential -- to a rule that fires on
+# any key-ish name or any random-looking run. It is scoped to those because
+# Heroku, HubSpot, KuCoin, MessageBird, Sendbird, Snyk and Squarespace all issue
+# UUID-shaped keys: as a global entry this switched every one of their rules off.
+targetRules = ["generic-api-key", "safepaste-high-entropy-string"]
+regexes = [
     '''^[0-9a-f]{7,8}$''',
     '''^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$''',
 ]
@@ -43,12 +58,23 @@ regexes = [
 # database URL is among the most damaging things to paste into a chat window.
 # The password group is what gets redacted; scheme, user, host and database all
 # survive, which keeps the string recognisable.
+#
+# The password may hold `/` and `@`: people paste passwords raw rather than
+# percent-encoded, and stopping at the first `@` printed the rest of the
+# password as if it were the host. An `@` is the password's only while another
+# follows before any `/` or space, so one in the path -- an npm scope, a
+# profile URL -- leaves the host alone. A quote is the password's only while
+# the rest runs to an `@` with no quote, space, comma or colon between, so a
+# URL that ends its string -- `"redis://h:6379","b":"x@y"` -- does not run on
+# into the next. The user may be empty (`redis://:password@host`). What cannot
+# be a password is a port, which is how `scheme://host:5432/path@x` would
+# otherwise read as `user:password@`.
 # --------------------------------------------------------------------------
 [[rules]]
 id = "safepaste-database-url-password"
 description = "Database connection string with an inline password"
 category = "connection_strings"
-regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis(?:s)?|amqps?|clickhouse|cockroachdb|mssql|sqlserver|jdbc:[a-z0-9]+)://[^\s:/@]{1,64}:([^\s/@]{3,256})@'''
+regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis(?:s)?|amqps?|clickhouse|cockroachdb|mssql|sqlserver|jdbc:[a-z0-9]+)://[^\s:/@]{0,64}:(?!\d{1,5}(?:[/?#]|$))((?:[^\s"'`@]|["'`](?=[^\s"'`,:@]*@)|@(?=[^\s"'`/@]*@)){3,256})@'''
 keywords = [
     "postgres", "postgresql", "mysql", "mariadb", "mongodb", "redis",
     "amqp", "clickhouse", "cockroachdb", "mssql", "sqlserver", "jdbc:",
@@ -58,7 +84,7 @@ keywords = [
 id = "safepaste-generic-url-password"
 description = "URL with an inline password"
 category = "connection_strings"
-regex = '''(?i)\b[a-z][a-z0-9+.-]{2,20}://[^\s:/@]{1,64}:([^\s/@]{6,256})@[a-z0-9.-]+'''
+regex = '''(?i)\b[a-z][a-z0-9+.-]{2,20}://[^\s:/@]{0,64}:(?!\d{1,5}(?:[/?#]|$))((?:[^\s"'`@]|["'`](?=[^\s"'`,:@]*@)|@(?=[^\s"'`/@]*@)){6,256})@[a-z0-9.-]+'''
 keywords = ["://"]
 entropy = 2.2
   [[rules.allowlists]]
@@ -67,6 +93,25 @@ entropy = 2.2
   regexes = [
       '''(?i)^(?:password|passwd|pass|secret|token|xxx+|\*+|<[^>]+>)$''',
   ]
+
+# --------------------------------------------------------------------------
+# PEM private keys. Replaces upstream's private-key, whose lazy
+# `[\s\S-]{64,}?KEY-----` runs on past a short block into the next one: a
+# hand-redacted or template key above a real one became a single match, either
+# dropped whole as already redacted or ending early enough to print the real
+# key's body. Here the body cannot contain `-----`, so a match stops at the
+# first armour line after its BEGIN and must end on a PRIVATE KEY END line.
+#
+# The second branch is a selection that stops before the END line -- the top of
+# a key copied on its own. It runs from the header through any `Proc-Type:`
+# style lines and the base64 lines that follow, and no further, so the prose
+# after a cut-off key is left alone.
+# --------------------------------------------------------------------------
+[[rules]]
+id = "private-key"
+description = "Private key"
+regex = '''(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----(?:(?>(?:[^-]|-(?!----)){64,})-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----|(?>(?:\r?\n[ \t]*[\w-]+:[^\r\n]*)*(?:\r?\n[ \t]*)?\r?\n[ \t]*[A-Za-z0-9+/=]{40,}(?:\r?\n[ \t]*[A-Za-z0-9+/=]+)*)(?!\r?\n[ \t]*-----END))'''
+keywords = ["-----begin"]
 
 # --------------------------------------------------------------------------
 # HTTP Authorization headers, as pasted out of browser devtools or a .http file.
@@ -102,9 +147,25 @@ keywords = ["session_token"]
 entropy = 4.0
 
 # --------------------------------------------------------------------------
-# Kubernetes credentials. kubernetes-secret-yaml upstream targets Secret
-# manifests; a kubeconfig is a different shape and is what people actually paste.
+# Kubernetes credentials: Secret manifests, and kubeconfig files, which are a
+# different shape and what people paste most.
+#
+# This replaces upstream's kubernetes-secret-yaml, which captures one value per
+# match and so redacted only the first entry of a Secret, leaving the rest in
+# the clear. One match here is a whole `data:` or `stringData:` block, and every
+# value in it is a capture of group 2 (the engine reports each one). The block
+# counts only if `kind: Secret` sits in the same YAML document, above it or --
+# as `kubectl get -o yaml` orders keys -- below it, within 200 lines either way.
+# Values that are templates, block scalars or empty are left alone, and a block
+# with no plain value in it does not match at all.
 # --------------------------------------------------------------------------
+[[rules]]
+id = "kubernetes-secret-yaml"
+description = "Kubernetes Secret data"
+regex = '''(?im)^([ \t]*)(?:data|stringData):[ \t]*(?:#[^\r\n]*)?(?:(?<=^[ \t]*(?:-[ \t]+)?kind:[ \t]*["']?secret\b(?!-)[^\r\n]*(?:\r?\n(?!---)[^\r\n]*){0,200})|(?=(?:\r?\n(?!---)[^\r\n]*){0,200}?\r?\n[ \t]*(?:-[ \t]+)?kind:[ \t]*["']?secret\b(?!-)))(?:\r?\n\1[ \t]+[\w.-]+:[ \t]*["']?([^\s"'#|>{][^\s"'#]{3,})["']?[ \t]*(?:#[^\r\n]*)?(?=\r?\n|$)|\r?\n\1[ \t]+[^\r\n]*|\r?\n[ \t]*(?:#[^\r\n]*)?(?=\r?\n|$))++(?(2)|(?!))'''
+secretGroup = 2
+keywords = ["secret"]
+
 [[rules]]
 id = "safepaste-kubeconfig-client-key"
 description = "kubeconfig client key data"
@@ -116,7 +177,10 @@ keywords = ["client-key-data"]
 id = "safepaste-kubeconfig-token"
 description = "kubeconfig user token"
 category = "tokens"
-regex = '''(?i)^\s{2,}token\s*:\s*["']?([\w\-./+=]{20,})'''
+# Multiline, so `^` is any line start: without it this fired only when the
+# token was the first line of the paste, never inside a kubeconfig. Horizontal
+# whitespace only, so the indent cannot reach back across blank lines.
+regex = '''(?im)^[ \t]{2,}token[ \t]*:[ \t]*["']?([\w\-./+=]{20,})'''
 keywords = ["token"]
 entropy = 3.5
 
@@ -138,7 +202,17 @@ category = "passwords"
 # so `password_reset_url=/foo` and `has_password=true` do not qualify. Entropy is
 # set low on purpose: a weak password is still a password, and unlike an API key
 # there is no length or charset floor to lean on.
-regex = '''(?im)^\s*(?:export\s+)?[\w.\-]{0,40}(?:password|passwd|pwd|secret)\s*[:=]\s*["']?([^\s"'#]{6,128})["']?\s*$'''
+#
+# The name starts a line, or follows `{`, `,` or `(` -- a JSON object or a call's
+# keyword arguments -- and may be quoted. A quoted value runs to its closing
+# quote, spaces, `#` and `$` included, and whatever follows it on the line is
+# not the value's business. An unquoted value counts only where the name starts
+# the line (env, YAML, ini): after `{`, `,` or `(` it is code passing a variable
+# or a number along, not a literal. It must run to the end of the line, less a
+# trailing `,` or `;` and a ` # comment`: `#` with no space before it is part of
+# the password, not a comment.
+regex = '''(?im)(?|^[ \t]*(?:export[ \t]+|-[ \t]+)?(["']?)[\w.\-]{0,40}(?:password|passwd|pwd|secret)\1[ \t]*(?::?=|:)[ \t]*(?|"([^"\r\n]{6,128})"|'([^'\r\n]{6,128})'|([^\s"'][^\s"']{5,127}?)[,;]?(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$)|[{,(][ \t]*(["']?)[\w.\-]{0,40}(?:password|passwd|pwd|secret)\1[ \t]*(?::?=|:)[ \t]*(?|"([^"\r\n]{6,128})"|'([^'\r\n]{6,128})'))'''
+secretGroup = 2
 keywords = ["password", "passwd", "pwd", "secret"]
 entropy = 1.8
   [[rules.allowlists]]
@@ -146,7 +220,12 @@ entropy = 1.8
       '''(?i)^(?:true|false|null|nil|none|undefined|yes|no|on|off|\d{1,4})$''',
       # Values that are themselves a lookup, not a literal.
       '''^[$%]\{?[\w.]+\}?$''',
+      '''^\$\{[^}\s]+\}$''',
+      '''^\$\([^)]*\)$''',
+      '''^<%.*%>$''',
       '''(?i)^(?:required|optional|unset|empty|todo|tbd|n/?a)$''',
+      # Schema and documentation examples name the type, not a value.
+      '''(?i)^(?:string|password|secret|text|value)$''',
   ]
 
 # --------------------------------------------------------------------------
@@ -217,13 +296,17 @@ id = "safepaste-high-entropy-string"
 description = "High entropy string"
 category = "high_entropy"
 default_off = true
-regex = '''\b([A-Za-z0-9+/_\-]{32,128}={0,2})\b'''
+# Bounded by the class itself rather than `\b` and a maximum length: with
+# `{32,128}\b`, a run longer than 128 characters had no boundary where the
+# match could end, so the longest tokens -- the likeliest to be key material --
+# matched nothing at all.
+regex = '''(?<![A-Za-z0-9+/_\-])([A-Za-z0-9+/_\-]{32,}+={0,2})(?![A-Za-z0-9+/_\-])'''
 keywords = []
 entropy = 4.5
   [[rules.allowlists]]
   regexes = [
       # Hex-only runs are usually digests, not credentials.
-      '''(?i)^[0-9a-f]{32,128}$''',
+      '''(?i)^[0-9a-f]{32,}$''',
       # Base64 of something structured, e.g. an embedded PNG.
       '''^(?:iVBOR|R0lGOD|/9j/|JVBERi0)''',
   ]

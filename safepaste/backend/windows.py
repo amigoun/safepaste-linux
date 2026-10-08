@@ -377,6 +377,8 @@ class WindowsClipboardMonitor:
             return
         if self._claim_own_write(event.digest):
             log.debug("ignoring our own clipboard write")
+            # Kept as the last value seen, so a clipboard manager re-asserting
+            # what we wrote is not taken for a new copy and redacted again.
             self._last_digest = event.digest
             return
         if event.digest == self._last_digest:

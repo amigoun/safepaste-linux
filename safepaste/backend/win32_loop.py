@@ -105,8 +105,9 @@ def parse_accelerator(accel: str) -> tuple[int, int] | None:
         vk = ord(key.upper())
     else:
         return None
-    if mods == 0:
-        # A bare key would grab it system-wide from every application.
+    if not mods & (MOD_CONTROL | MOD_ALT | MOD_WIN):
+        # A bare key would grab it system-wide from every application, and Shift
+        # alone is only a capital letter: <Shift>v would swallow every V.
         return None
     return mods | MOD_NOREPEAT, vk
 
@@ -541,6 +542,7 @@ class Tray:
         self._mode = "redact"
         self._paused = False
         self._alert: int | None = None
+        self._removed: bool | None = None
         self._nid: Any = None
         self._shell32: Any = None
         # Command ids for the popup menu, resolved back to actions on click.
@@ -562,9 +564,13 @@ class Tray:
         self._mode, self._paused, self._alert = mode, paused, None
         self._refresh()
 
-    def set_alert(self, secrets: int) -> None:
+    def set_alert(self, secrets: int, removed: bool | None = None) -> None:
         self._alert = secrets
+        self._removed = removed
         self._refresh()
+
+    def _alert_removed(self) -> bool:
+        return self._mode == "redact" if self._removed is None else self._removed
 
     def clear_alert(self) -> None:
         self._alert = None
@@ -580,7 +586,7 @@ class Tray:
     def _tooltip(self) -> str:
         if self._alert is not None:
             noun = "secret" if self._alert == 1 else "secrets"
-            verb = "removed from" if self._mode == "redact" else "still on"
+            verb = "removed from" if self._alert_removed() else "still on"
             return f"SafePaste — {self._alert} {noun} {verb} the clipboard"
         if self._paused:
             return "SafePaste — paused"
@@ -700,15 +706,14 @@ class Tray:
 
         status = (
             f"{self._alert} secret{'s' if self._alert != 1 else ''} "
-            f"{'removed' if self._mode == 'redact' else 'found'}"
+            f"{'removed' if self._alert_removed() else 'found'}"
             if self._alert is not None
             else "Paused" if self._paused
             else "Protection off" if self._mode == "off"
             else "Protected"
         )
         labels = {
-            "redact": "Redact automatically", "ask": "Ask every time",
-            "notify": "Notify only", "off": "Off",
+            "redact": "Redact automatically", "notify": "Notify only", "off": "Off",
         }
         items: list[tuple[str, str, dict]] = [
             ("status", status, {"enabled": False}),
@@ -717,6 +722,10 @@ class Tray:
             ("separator", "", {}),
         ]
         for mode in MODES:
+            if mode == "ask":
+                # Nothing on this platform can ask, so `ask` runs as `redact`
+                # (Guard.can_ask) and is not a choice of its own here.
+                continue
             items.append(
                 ("mode", labels[mode], {"mode": mode, "checked": mode == self._mode})
             )

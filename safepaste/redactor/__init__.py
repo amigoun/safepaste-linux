@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..detector.engine import DEFAULT_PLACEHOLDER, Finding, merge_spans
+from ..detector.engine import (
+    DEFAULT_PLACEHOLDER,
+    Finding,
+    labelled_placeholder,
+    merge_spans,
+)
 
 __all__ = [
     "DEFAULT_KEEP_PREFIX",
@@ -151,8 +156,7 @@ def _replacement(secret: str, rule_ids: list[str], style: RedactionStyle) -> str
         for rid in rule_ids:
             if rid not in seen:
                 seen.append(rid)
-        inner = ",".join(seen)
-        body = f"{style.placeholder.rstrip(']')}:{inner}]"
+        body = labelled_placeholder(style.placeholder, seen)
     prefix, suffix = _edges(secret, style)
     if prefix and suffix:
         return f"{prefix}…{body}…{suffix}"

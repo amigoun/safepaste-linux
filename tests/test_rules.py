@@ -207,6 +207,45 @@ def test_vetoed_rule_finds_nothing(tmp_path) -> None:
     assert not [f for f in detector.scan(text) if f.rule_id == "github-pat"]
 
 
+def test_a_veto_needs_only_the_id(tmp_path) -> None:
+    """`id` + `enabled = false` is the whole veto; copying the regex is not
+    required, and a typo in such a copy is how a veto quietly fails."""
+    path = tmp_path / "veto.toml"
+    path.write_text('[[rules]]\nid = "github-pat"\nenabled = false\n', encoding="utf-8")
+
+    rs = load_default(extra_paths=[path])
+
+    assert "github-pat" not in {r.id for r in rs.enabled_for(None)}
+    detector = Detector(ruleset=rs)
+    text = "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z"
+    assert not [f for f in detector.scan(text) if f.rule_id == "github-pat"]
+    # The rule is silenced, not replaced: everything else about it is intact.
+    rule = next(r for r in rs.rules if r.id == "github-pat")
+    assert rule.pattern.pattern == next(
+        r for r in load_default().rules if r.id == "github-pat"
+    ).pattern.pattern
+
+
+def test_default_off_alone_makes_a_bundled_rule_opt_in(tmp_path) -> None:
+    path = tmp_path / "quiet.toml"
+    path.write_text('[[rules]]\nid = "github-pat"\ndefault_off = true\n', encoding="utf-8")
+
+    rs = load_default(extra_paths=[path])
+
+    assert "github-pat" not in {r.id for r in rs.enabled_for(None)}
+    assert "github-pat" in {r.id for r in rs.enabled_for(frozenset({"tokens"}))}
+
+
+def test_a_string_veto_without_a_regex_is_refused(tmp_path, caplog) -> None:
+    path = tmp_path / "veto.toml"
+    path.write_text('[[rules]]\nid = "github-pat"\nenabled = "false"\n', encoding="utf-8")
+
+    rs = load_default(extra_paths=[path])
+
+    assert next(r for r in rs.rules if r.id == "github-pat").enabled is True
+    assert "enabled must be true or false" in caplog.text
+
+
 def test_default_off_is_not_a_veto() -> None:
     """`default_off` withholds a rule by default but must stay switchable."""
     ruleset = load_default()
@@ -266,3 +305,146 @@ def test_rules_using_the_anchor_are_active(ruleset) -> None:
         "sentry-org-token",
     ):
         assert rule_id in ids, f"{rule_id} is missing; did the \\z translation break?"
+
+
+# ---------------------------------------------------------------------------
+# Malformed rule files: the bad entry is skipped and said so, never a crash.
+#
+# A user file is hand-written TOML, and every one of these shapes parses as
+# valid TOML. They used to raise from deep inside the loader -- or worse, at
+# scan time -- and one of them quietly widened an allowlist instead.
+# ---------------------------------------------------------------------------
+
+_GITHUB_TOKEN = "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z"
+
+
+def _user_rules(tmp_path, body: str) -> pathlib.Path:
+    path = tmp_path / "custom.toml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_rules_written_as_a_table_not_an_array_are_skipped(tmp_path, caplog) -> None:
+    path = _user_rules(tmp_path, '[rules]\nid = "x"\nregex = "CUSTOMSECRET"\n')
+
+    rs = load_default(extra_paths=[path])
+
+    assert "github-pat" in {r.id for r in rs.rules}, "the bundled rules still load"
+    assert "x" not in {r.id for r in rs.rules}
+    assert "[[rules]]" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("line", "complaint"),
+    [
+        ("regex = 5", "regex must be a string"),
+        ('regex = "CUSTOM[0-9]{4}"\nentropy = "3.0"', "entropy must be a number"),
+        ('regex = "CUSTOM[0-9]{4}"\nkeywords = "custom"', "keywords must be"),
+        ('regex = "CUSTOM[0-9]{4}"\nsecretGroup = 3', "secretGroup 3"),
+        ('regex = "CUSTOM[0-9]{4}"\nenabled = "false"', "enabled must be"),
+    ],
+    ids=["regex-int", "entropy-string", "keywords-string", "group-out-of-range",
+         "enabled-string"],
+)
+def test_a_rule_with_a_mistyped_field_is_skipped_with_a_warning(
+    tmp_path, caplog, line: str, complaint: str
+) -> None:
+    path = _user_rules(tmp_path, f'[[rules]]\nid = "safepaste-test-bad"\n{line}\n')
+
+    rs = load_default(extra_paths=[path])
+
+    assert "safepaste-test-bad" not in {r.id for r in rs.rules}
+    assert "safepaste-test-bad" in caplog.text and complaint in caplog.text
+    # And scanning with what did load still works.
+    assert Detector(ruleset=rs).scan(f"{_GITHUB_TOKEN} CUSTOM1234")
+
+
+def test_a_string_enabled_does_not_replace_the_rule_it_names(tmp_path) -> None:
+    """`enabled = "false"` is truthy; the vendored rule must stay as it was."""
+    path = _user_rules(
+        tmp_path,
+        '[[rules]]\nid = "github-pat"\nregex = "ghp_[0-9a-zA-Z]{36}"\n'
+        'enabled = "false"\n',
+    )
+
+    rs = load_default(extra_paths=[path])
+
+    rule = next(r for r in rs.rules if r.id == "github-pat")
+    assert rule.enabled is True
+    assert rule.description != "github-pat", "the vendored rule must survive"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '[allowlist]\nregexes = "abc"\n',
+        '[[rules]]\nid = "github-pat"\nregex = "ghp_[0-9a-zA-Z]{36}"\n'
+        '  [[rules.allowlists]]\n  regexes = "abc"\n',
+        '[allowlist]\nstopwords = "abc"\n',
+        '[allowlist]\ncondition = 1\nregexes = ["^ghp_"]\n',
+    ],
+    ids=["global-regexes-string", "rule-regexes-string", "stopwords-string",
+         "condition-int"],
+)
+def test_a_malformed_allowlist_is_dropped_not_widened(
+    tmp_path, caplog, body: str
+) -> None:
+    """A string where an array belongs iterates per character: "abc" became
+    three one-letter patterns excusing any secret with an a, b or c in it."""
+    rs = load_default(extra_paths=[_user_rules(tmp_path, body)])
+
+    found = Detector(ruleset=rs).scan(_GITHUB_TOKEN)
+
+    assert "github-pat" in {f.rule_id for f in found}
+    assert "skipping an allowlist" in caplog.text
+
+
+def test_an_and_allowlist_with_an_uncompilable_regex_is_dropped() -> None:
+    """Under AND, losing a criterion means excusing more."""
+    with pytest.raises(ValueError):
+        Allowlist.from_toml(
+            {"condition": "AND", "stopwords": ["ghp"], "regexes": ["(unclosed"]}
+        )
+
+
+# ---------------------------------------------------------------------------
+# Upstream's global `(?i)^true|false|null$` binds as `^true` | `false` |
+# `null$`, so it allowed any secret that merely contained "false".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "Zq8vR2kLfalseN4pT7wXbY9cE1fG3",
+        "trueZq8vR2kLN4pT7wXbY9cE1fG3",
+        "Zq8vR2kLN4pT7wXbY9cE1fG3null",
+    ],
+)
+def test_a_secret_containing_a_boolean_word_is_still_found(
+    secret: str, ruleset: RuleSet
+) -> None:
+    text = f"API_KEY={secret}"
+    found = Detector(ruleset=ruleset).scan(text)
+    assert secret in [text[f.start : f.end] for f in found]
+
+
+@pytest.mark.parametrize("value", ["true", "FALSE", "null"])
+def test_a_bare_boolean_is_still_allowed(value: str, ruleset: RuleSet) -> None:
+    assert any(a.excludes(value, value, value) for a in ruleset.global_allowlists)
+
+
+def test_the_vendored_file_still_carries_the_pattern_being_corrected() -> None:
+    """If upstream fixes it, the correction is dead weight and can go."""
+    from safepaste.detector.rules import GITLEAKS_TOML
+
+    vendored = GITLEAKS_TOML.read_text(encoding="utf-8")
+    assert "(?i)^true|false|null$" in vendored
+
+
+def test_a_global_allowlist_with_target_rules_spares_every_other_rule() -> None:
+    al = Allowlist.from_toml({"targetRules": ["generic-api-key"], "regexes": ["^x$"]})
+
+    assert al.applies_to("generic-api-key")
+    assert not al.applies_to("heroku-api-key")
+    assert Allowlist.from_toml({"regexes": ["^x$"]}).applies_to("heroku-api-key")

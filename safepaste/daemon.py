@@ -100,8 +100,10 @@ class Daemon:
         cfg: config_mod.Config | None = None,
         *,
         on_detection=None,
+        on_incomplete=None,
         on_state_changed=None,
         backend: Backend | None = None,
+        can_ask: bool = False,
     ) -> None:
         # Interposed rather than passed straight through: the bus signal must
         # fire for every detection regardless of whether a front end is attached,
@@ -116,7 +118,10 @@ class Daemon:
             cfg,
             backend=backend or get_backend(),
             on_detection=self._on_detection,
+            on_incomplete=on_incomplete,
             timer=_GLibTimer(),
+            # Only a front end with a dialog can ask; run headless, `ask` redacts.
+            can_ask=can_ask,
         )
         self.loop = GLib.MainLoop()
         self._owner_id: int | None = None

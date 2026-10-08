@@ -27,7 +27,13 @@ from typing import Any
 
 from . import config as config_mod, hardening
 from .backend import Backend, get_backend
-from .guard import Guard
+from .guard import (
+    NOT_REMOVED,
+    PARTLY_CHECKED_BODY,
+    PARTLY_CHECKED_TITLE,
+    REMOVED,
+    Guard,
+)
 
 log = logging.getLogger(__name__)
 
@@ -84,14 +90,24 @@ class PollingShell:
         # Handle of the pending "N secrets removed" expiry, so a newer detection
         # restarts the clock instead of inheriting the old one.
         self._alert_handle: Any = None
+        # Handle of the repaint due when a timed pause lapses.
+        self._pause_handle: Any = None
         self.notify = notify if notify is not None else _default_notifier()
         self.guard = Guard(
             cfg,
             backend=backend or get_backend(),
             on_detection=self._on_detection,
+            on_incomplete=self._on_incomplete,
             timer=self.timer,
+            # Notifications and a menu, but no dialog: nothing here can ask, and
+            # nothing can offer the undo.
+            can_ask=False,
+            can_restore=False,
         )
         self._stop = False
+        # Set while consecutive polls keep failing, so a fault that recurs on
+        # every tick is logged once rather than three times a second.
+        self._poll_failing = False
         self._hotkey = None
         self._listener = None
         self._tray = None
@@ -111,30 +127,35 @@ class PollingShell:
         labels = ", ".join(result.labels[:3]) or "unknown"
         if len(result.labels) > 3:
             labels += f", and {len(result.labels) - 3} more"
+        outcome = self.guard.last_outcome
 
         if self._tray is not None:
-            self._tray.set_alert(secrets)
+            self._tray.set_alert(secrets, removed=outcome == REMOVED)
             # And take it down again. Without this one detection leaves the tray
             # reading "1 secret removed" for the rest of the session -- a claim
-            # about the past sitting where the current state belongs. The lifetime
-            # is the restore window, which is exactly how long the event stays
-            # actionable; with retention off, long enough to read.
+            # about the past sitting where the current state belongs. There is no
+            # restore window here to tie it to, so long enough to read.
             if self._alert_handle is not None:
                 self.timer.cancel(self._alert_handle)
             self._alert_handle = self.timer.schedule(
-                self.guard.config.restore_timeout_secs or ALERT_FALLBACK_SECS,
-                self._expire_alert,
+                ALERT_FALLBACK_SECS, self._expire_alert
             )
 
-        if self.guard.config.mode == "redact":
+        if outcome == REMOVED:
             title = f"{secrets} {noun} removed from the clipboard"
             body = f"{labels}. {result.chars_kept:,} characters kept."
+        elif outcome == NOT_REMOVED:
+            title = f"{secrets} {noun} could not be removed"
+            body = f"{labels}. The clipboard still holds {'it' if secrets == 1 else 'them'}."
         else:
             # In every other mode the clipboard is untouched, and saying "removed"
             # would be a plain untruth about a secret that is still sitting there.
             title = f"{secrets} {noun} on the clipboard"
             body = labels
         self.notify(title, body)
+
+    def _on_incomplete(self, _event) -> None:
+        self.notify(PARTLY_CHECKED_TITLE, PARTLY_CHECKED_BODY)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -172,7 +193,7 @@ class PollingShell:
         )
         if tray is not None and tray.start():
             self._tray = tray
-            tray.set_state(self.guard.config.mode, self.guard.paused)
+            self._refresh_tray()
         elif tray is not None:
             log.info("no tray icon on this session; everything else is unaffected")
 
@@ -183,13 +204,27 @@ class PollingShell:
 
     def _set_mode(self, mode: str) -> None:
         self.guard.set_mode(mode)
-        if self._tray is not None:
-            self._tray.set_state(self.guard.config.mode, self.guard.paused)
+        self._refresh_tray()
 
     def _set_paused(self, paused: bool, seconds: int) -> None:
         self.guard.set_paused(paused, seconds)
+        if self._pause_handle is not None:
+            self.timer.cancel(self._pause_handle)
+            self._pause_handle = None
+        if paused and seconds:
+            # The pause ends by itself, with nothing to say so; come back then, or
+            # the icon goes on reading "Paused" over a guard that is protecting.
+            self._pause_handle = self.timer.schedule(seconds, self._on_pause_lapsed)
+        self._refresh_tray()
+
+    def _on_pause_lapsed(self) -> None:
+        self._pause_handle = None
+        self._refresh_tray()
+
+    def _refresh_tray(self) -> None:
+        # The applied mode, so a configured `ask` shows as the redaction it runs as.
         if self._tray is not None:
-            self._tray.set_state(self.guard.config.mode, self.guard.paused)
+            self._tray.set_state(self.guard.effective_mode, self.guard.paused)
 
     def _show_preferences(self) -> None:
         """No settings window on these platforms yet.
@@ -210,6 +245,22 @@ class PollingShell:
 
         if not open_homepage():
             self.notify("SafePaste", HOMEPAGE)
+
+    def _poll(self) -> None:
+        """One clipboard check that cannot end the loop.
+
+        The hotkey, menu and timer paths already survive a raising handler. This
+        one reaches the detector and the exclusion key on every copy, so an
+        exception escaping it would end protection for good.
+        """
+        try:
+            self.guard.monitor.poll_once()
+        except Exception:  # noqa: BLE001 - one bad copy must not end protection
+            if not self._poll_failing:
+                log.exception("clipboard check failed; still watching")
+            self._poll_failing = True
+        else:
+            self._poll_failing = False
 
     def run(self) -> int:
         if not self.guard.start():
@@ -235,7 +286,7 @@ class PollingShell:
                 # Still polled even when notifications are active. The poll is one
                 # integer compare when nothing changed, and it means a missed or
                 # unsupported notification degrades latency rather than correctness.
-                self.guard.monitor.poll_once()
+                self._poll()
                 self.timer.run_due()
                 time.sleep(self.interval)
         finally:
