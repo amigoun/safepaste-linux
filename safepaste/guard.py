@@ -29,7 +29,7 @@ from . import config as config_mod
 from . import markup
 from .backend import Backend, ClipboardEvent, get_backend
 from .detector import Detector, Finding, load_default, summarise, value_hash
-from .detector.engine import RULE_BUDGET_TIMEOUTS
+from .detector.engine import RULE_BUDGET_TIMEOUTS, SCAN_BUDGET_TIMEOUTS
 from .redactor import Redaction, RedactionStyle, redact
 
 log = logging.getLogger(__name__)
@@ -390,9 +390,14 @@ class Guard:
         formatting rather than safety.
         """
         style = self.redaction_style
-        plain = self.detector.scan(event.text)
+        # One budget for the copy rather than one per representation: on macOS
+        # the plain text, HTML and RTF are scanned one after another, on the
+        # thread the UI runs on. The plain text goes first, as what most targets
+        # paste; a representation left without time is only partly scanned.
+        deadline = time.monotonic() + self.config.regex_timeout * SCAN_BUDGET_TIMEOUTS
+        plain = self.detector.scan(event.text, deadline=deadline)
         scanned = {
-            name: (value, self.detector.scan(value))
+            name: (value, self.detector.scan(value, deadline=deadline))
             for name, value in event.representations.items()
         }
         # A representation scanned only in part still has its visible text
@@ -484,6 +489,8 @@ class Guard:
         )
         if parts is None:
             return None
+        # A budget of its own: this is what lets a partly scanned rich copy
+        # count as checked, and it is small next to the markup it came from.
         return parts, self.detector.scan(parts)
 
     def _write(self, text: str, representations: dict[str, str], flavour: str) -> bool:

@@ -1028,6 +1028,49 @@ def test_a_rule_that_spends_its_whole_scan_budget_is_skipped(monkeypatch) -> Non
     assert result.skipped_rules == ("test-slow",)
 
 
+GITHUB_LINE = "GITHUB_TOKEN=ghp_A9bC2dE4fG6hJ8kL0mN1pQ3rS5tU7vW9xY1z"
+
+
+def test_rules_not_reached_by_the_deadline_are_named_as_skipped(detector: Detector) -> None:
+    import time
+
+    result = detector.scan(GITHUB_LINE, deadline=time.monotonic() - 1)
+
+    assert result == []
+    assert "github-pat" in result.skipped_rules
+    assert result.incomplete is True
+
+
+def test_the_whole_scan_has_a_budget_not_only_each_rule(ruleset: RuleSet, monkeypatch) -> None:
+    """Per rule alone, the worst case grew with the number of rules whose
+    keywords appear: about four times the old worst case on a large paste."""
+    from safepaste.detector import engine
+
+    monkeypatch.setattr(engine, "SCAN_BUDGET_TIMEOUTS", 0)
+    result = Detector(ruleset=ruleset).scan(GITHUB_LINE)
+
+    assert result == []
+    assert "github-pat" in result.skipped_rules
+
+
+def test_rules_anchored_on_a_token_prefix_run_before_keyword_rules(detector: Detector) -> None:
+    """A spent budget skips the rules left at the end, so those are the slow,
+    loosely anchored keyword rules rather than a GitHub token's."""
+    from safepaste.detector import engine
+
+    loose = [bool(engine._LOOSE_START.match(r.pattern.pattern)) for r in detector.active_rules]
+    assert any(loose) and loose == sorted(loose)
+    ids = [r.id for r in detector.active_rules]
+    assert ids.index("github-pat") < ids.index("generic-api-key")
+
+
+def test_only_rules_that_look_ahead_read_past_a_window(detector: Detector) -> None:
+    """For the rest, the read-ahead is text read twice to no purpose."""
+    assert "kubernetes-secret-yaml" in detector._looks_ahead
+    assert "private-key" in detector._looks_ahead
+    assert "generic-api-key" not in detector._looks_ahead
+
+
 # ---------------------------------------------------------------------------
 # The CLI's exit code for an incomplete scan
 # ---------------------------------------------------------------------------

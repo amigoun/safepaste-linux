@@ -77,6 +77,18 @@ SCAN_READ_AHEAD = 32_768
 # window, so without a cap across windows a rule slow on a megabyte could cost
 # a timeout per window -- per representation, on the thread the UI runs on.
 RULE_BUDGET_TIMEOUTS = 4
+# What a whole scan may spend, in regex timeouts. Per rule alone, the worst case
+# grew with the number of rules whose keywords appear. Rules not reached in time
+# are skipped and reported, as a rule over its own budget is.
+SCAN_BUDGET_TIMEOUTS = 8
+
+# Only these need the read-ahead; for every other rule it would be text read
+# twice to no purpose.
+_LOOKAHEAD = regex.compile(r"\(\?[=!]")
+# Gitleaks' keyword rules open on a run of name characters, so every position
+# is a start to try. They are the slow ones on a large paste, and they run after
+# the rules anchored on a token's own prefix, which a spent budget then spares.
+_LOOSE_START = regex.compile(r"^(?:\(\?[a-z]+\))?\[\\w\.-\]\{0,\d+\}")
 
 
 # Named in the digest itself, so a config file states which algorithm produced
@@ -223,7 +235,13 @@ class Detector:
                 placeholder,
                 MIN_SUPPRESSING_PLACEHOLDER,
             )
-        self._active = self.ruleset.enabled_for(categories)
+        self._active = sorted(
+            self.ruleset.enabled_for(categories),
+            key=lambda rule: bool(_LOOSE_START.match(_source(rule))),
+        )
+        self._looks_ahead = {
+            rule.id for rule in self._active if _LOOKAHEAD.search(_source(rule))
+        }
 
     @property
     def active_rules(self) -> list[Rule]:
@@ -290,7 +308,9 @@ class Detector:
             raise TimeoutError("the rule's scan budget is spent")
         return min(self.regex_timeout, left)
 
-    def scan(self, text: str) -> ScanResult:
+    def scan(self, text: str, *, deadline: float | None = None) -> ScanResult:
+        """Find the secrets in `text`, within the scan budget and by `deadline`
+        (a `time.monotonic()` value) if given -- one budget for several scans."""
         if not text:
             return ScanResult()
 
@@ -311,21 +331,30 @@ class Detector:
             truncated = True
 
         lowered = text.lower()
-        windows = _windows(text)
+        windows = _windows(text, read_ahead=0)
+        reading_ahead = _windows(text)
         findings: list[Finding] = []
         seen: set[tuple[str, int, int]] = set()
         timed_out: list[str] = []
         started = time.monotonic()
+        scan_deadline = started + self.regex_timeout * SCAN_BUDGET_TIMEOUTS
+        if deadline is not None:
+            scan_deadline = min(scan_deadline, deadline)
 
         for rule in self._active:
             if rule.keywords and not any(k in lowered for k in rule.keywords):
                 continue
             matches: list[regex.Match] = []
-            deadline = time.monotonic() + self.regex_timeout * RULE_BUDGET_TIMEOUTS
+            rule_deadline = min(
+                time.monotonic() + self.regex_timeout * RULE_BUDGET_TIMEOUTS,
+                scan_deadline,
+            )
             try:
-                for pos, endpos, owned in windows:
+                for pos, endpos, owned in (
+                    reading_ahead if rule.id in self._looks_ahead else windows
+                ):
                     for m in rule.pattern.finditer(
-                        text, pos, endpos, timeout=self._time_left(deadline)
+                        text, pos, endpos, timeout=self._time_left(rule_deadline)
                     ):
                         if m.start() >= owned:
                             break
@@ -338,15 +367,16 @@ class Detector:
                             # `$` or `\b`, made this one; and a timeout here
                             # skips the rule like any other.
                             m = rule.pattern.match(
-                                text, m.start(), timeout=self._time_left(deadline)
+                                text, m.start(), timeout=self._time_left(rule_deadline)
                             )
                             if m is None:
                                 continue
                         matches.append(m)
             except TimeoutError:
-                # A pathological input made this rule superlinear, or it spent
-                # its budget. Drop it for the rest of this scan rather than hang
-                # the clipboard; whatever it found in earlier windows stands.
+                # A pathological input made this rule superlinear, or it or the
+                # scan spent its budget. Drop it for the rest of this scan rather
+                # than hang the clipboard; whatever it found in earlier windows
+                # stands.
                 timed_out.append(rule.id)
             except regex.error as exc:  # pragma: no cover - defensive
                 log.warning("rule %s failed at match time: %s", rule.id, exc)
@@ -398,8 +428,8 @@ class Detector:
         elapsed = time.monotonic() - started
         if timed_out:
             log.warning(
-                "%d rule(s) exceeded the %.0fms regex timeout or %.0fms scan "
-                "budget and were skipped: %s",
+                "%d rule(s) exceeded the %.0fms regex timeout, the %.0fms rule "
+                "budget or the scan's time and were skipped: %s",
                 len(timed_out),
                 self.regex_timeout * 1000,
                 self.regex_timeout * RULE_BUDGET_TIMEOUTS * 1000,
@@ -423,17 +453,21 @@ class Detector:
         )
 
 
-def _windows(text: str) -> list[tuple[int, int, int]]:
+def _source(rule: Rule) -> str:
+    return getattr(rule.pattern, "pattern", "")
+
+
+def _windows(text: str, read_ahead: int = SCAN_READ_AHEAD) -> list[tuple[int, int, int]]:
     r"""`(pos, endpos, owned)` per window: scan text[pos:endpos], keep matches
     starting before `owned`.
 
     Each window owns the stretch up to where the next begins and reads on for at
     least the overlap past it, so a match no longer than the overlap is seen
-    whole by exactly one window. Past that it reads on a further
-    `SCAN_READ_AHEAD`, so that lookaheads see what follows a match near the
-    seam. Boundaries fall on line ends where one is near, because `^`, `$` and
-    `\b` treat a window edge as the edge of the text; a line longer than a
-    window is cut mid-way, and the overlap covers the seam.
+    whole by exactly one window. Past that it reads on a further `read_ahead`,
+    so that lookaheads see what follows a match near the seam. Boundaries fall
+    on line ends where one is near, because `^`, `$` and `\b` treat a window
+    edge as the edge of the text; a line longer than a window is cut mid-way,
+    and the overlap covers the seam.
     Scanning with pos/endpos rather than slicing keeps offsets those of `text`
     and lets lookbehinds see past the window's start.
     """
@@ -447,7 +481,7 @@ def _windows(text: str) -> list[tuple[int, int, int]]:
         nxt = newline + 1 if newline > pos else stride
         newline = text.rfind("\n", nxt + SCAN_WINDOW_OVERLAP - 1, limit)
         endpos = newline + 1 if newline != -1 else limit
-        out.append((pos, min(n, endpos + SCAN_READ_AHEAD), nxt))
+        out.append((pos, min(n, endpos + read_ahead), nxt))
         pos = nxt
     out.append((pos, n, n))
     return out

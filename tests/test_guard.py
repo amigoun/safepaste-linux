@@ -387,7 +387,7 @@ class _PartialScan(list):
 
 
 class _PartialDetector:
-    def scan(self, _text: str) -> _PartialScan:
+    def scan(self, _text: str, **_kw) -> _PartialScan:
         return _PartialScan()
 
 
@@ -410,7 +410,7 @@ def test_a_partly_scanned_representation_is_not_kept(guard_factory) -> None:
     real = guard.detector
 
     class HtmlPartly:
-        def scan(self, text: str):
+        def scan(self, text: str, **_kw):
             found = real.scan(text)
             return _PartialScan(found) if text.startswith("<") else found
 
@@ -430,7 +430,7 @@ def test_a_secret_found_only_in_the_markup_is_removed_from_the_plain_text_too(
     real = guard.detector
 
     class PlainBlind:
-        def scan(self, text: str):
+        def scan(self, text: str, **_kw):
             return real.scan(text) if text.startswith("<") else real.scan("")
 
     guard.detector = PlainBlind()
@@ -455,7 +455,7 @@ def test_a_partly_scanned_copy_with_a_finding_still_says_it_was_partly_checked(
     real = guard.detector
 
     class PartlyWithFindings:
-        def scan(self, text: str):
+        def scan(self, text: str, **_kw):
             return _PartialScan(real.scan(text))
 
     told: list[ClipboardEvent] = []
@@ -482,7 +482,7 @@ class _RichPartly:
     def __init__(self, real) -> None:
         self.real = real
 
-    def scan(self, text: str):
+    def scan(self, text: str, **_kw):
         found = self.real.scan(text)
         return _PartialScan(found) if text.startswith("<") else found
 
@@ -504,6 +504,34 @@ def test_a_partly_scanned_markup_only_copy_is_reported(guard_factory) -> None:
     guard.detector = _RichPartly(guard.detector)
     guard.handle(ClipboardEvent.of("", representations={"text/html": "<p>a large table</p>"}))
     assert len(told) == 1
+
+
+def test_one_copy_shares_one_scan_deadline(guard_factory) -> None:
+    """On macOS the plain text, HTML and RTF are scanned one after another on
+    the UI thread, so a budget each would triple the worst case. What the markup
+    hides from its text has a budget of its own, being what lets a partly
+    scanned rich copy count as checked."""
+    guard, _, _ = guard_factory(mode="redact")
+    real = guard.detector
+    deadlines: list[float | None] = []
+
+    class Recording:
+        def scan(self, text: str, **kw):
+            deadlines.append(kw.get("deadline"))
+            found = real.scan(text, **kw)
+            return _PartialScan(found) if text.startswith("<") else found
+
+    guard.detector = Recording()
+    guard.handle(
+        ClipboardEvent.of(
+            PAYLOAD,
+            representations={"text/html": f"<pre>{PAYLOAD}</pre>", "public.rtf": "{\\rtf1 x}"},
+        )
+    )
+
+    shared, own = deadlines[:3], deadlines[3:]
+    assert shared[0] is not None and len(set(shared)) == 1
+    assert own == [None]
 
 
 # A rich copy whose markup is past the scan cap while its text is not: the

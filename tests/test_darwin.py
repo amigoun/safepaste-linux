@@ -676,7 +676,7 @@ def test_polling_shell_says_when_a_copy_was_only_partly_checked(
         truncated = False
 
     class PartialDetector:
-        def scan(self, _text: str) -> PartialScan:
+        def scan(self, _text: str, **_kw) -> PartialScan:
             return PartialScan()
 
     board = FakePasteboard({UTI_STRING: "quiet"})
@@ -723,7 +723,7 @@ def test_polling_shell_says_once_when_a_copy_with_a_secret_was_partly_checked(
     real = shell.guard.detector
 
     class PartlyWithFindings:
-        def scan(self, text: str) -> PartialScan:
+        def scan(self, text: str, **_kw) -> PartialScan:
             return PartialScan(real.scan(text))
 
     shell.guard.detector = PartlyWithFindings()
