@@ -17,7 +17,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from . import Backend, ClipboardEvent, ClipboardMonitor, ClipboardWriter
+from . import Backend, ClipboardEvent, ClipboardMonitor, ClipboardReader
+from . import ClipboardWriter
 from . import HotkeyBinder, Injector, LockWatcher, Tray
 
 log = logging.getLogger(__name__)
@@ -79,6 +80,23 @@ class LinuxBackend(Backend):
         return FallbackWriter()
 
     # -- optional ----------------------------------------------------------
+
+    def primary_selection(self) -> tuple[ClipboardReader, ClipboardWriter] | None:
+        # X11 only, with no wl-clipboard fallback: Mutter bridges PRIMARY the
+        # same way it bridges CLIPBOARD, and a failed read here costs the
+        # middle-click redaction, never the clipboard one.
+        from functools import partial
+
+        from ..clipboard.x11 import X11SelectionReader, XlibConnection
+        from ..clipboard.x11_owner_conn import XlibOwnerConnection
+        from ..clipboard.x11write import X11SelectionOwner
+
+        return (
+            X11SelectionReader(connect=partial(XlibConnection, "PRIMARY")),
+            X11SelectionOwner(
+                connect=partial(XlibOwnerConnection, selection="PRIMARY")
+            ),
+        )
 
     def lock_watcher(self) -> LockWatcher | None:
         # Needed here specifically: wl-clipboard blocks in poll() for as long as

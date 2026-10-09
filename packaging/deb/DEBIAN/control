@@ -19,10 +19,12 @@ Description: clipboard secret-guard for the Linux desktop
  .
  In the default "redact" mode, the instant a matching secret is copied
  the clipboard is replaced with a placeholder immediately -- only
- afterwards is a notification/dialog shown, offering to restore the
- original for a short window. That ordering is deliberate: ignoring the
- dialog, the dialog failing to appear, or the daemon dying mid-decision
- all still leave the clipboard safe, because the swap already happened.
+ afterwards is a notification shown, offering to restore the original
+ for a short window. That ordering is deliberate: ignoring the
+ notification, the notification failing to appear, or the daemon dying
+ mid-decision all still leave the clipboard safe, because the swap
+ already happened. The middle-click selection is cleaned at the same
+ moment.
  .
  Detection runs entirely on this machine against a vendored Gitleaks rule
  set plus a small number of SafePaste-specific rules; no network calls

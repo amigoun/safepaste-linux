@@ -71,8 +71,13 @@ write_shim safepaste-gui    safepaste.app
 # point it at this one instead.
 sed "s|^ExecStart=.*|ExecStart=$BINDIR/safepaste-gui|" \
     "$REPO/packaging/systemd/safepaste.service" > "$UNITDIR/safepaste.service"
+# Named after the application ID, which GNOME requires before it will show the
+# app's notifications. Earlier installs wrote safepaste.desktop; drop it, or the
+# app grid lists SafePaste twice.
+rm -f "$DESKTOPDIR/safepaste.desktop"
 sed "s|^Exec=.*|Exec=$BINDIR/safepaste-gui|" \
-    "$REPO/packaging/safepaste.desktop" > "$DESKTOPDIR/safepaste.desktop"
+    "$REPO/packaging/dev.safepaste.SafePaste.desktop" \
+    > "$DESKTOPDIR/dev.safepaste.SafePaste.desktop"
 
 systemctl --user daemon-reload
 systemctl --user enable safepaste.service >/dev/null

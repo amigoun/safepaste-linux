@@ -39,7 +39,9 @@ class _Request:
 
 
 class XlibOwnerConnection:
-    def __init__(self, on_request, on_cleared=None, attach=True) -> None:
+    def __init__(
+        self, on_request, on_cleared=None, attach=True, selection: str = "CLIPBOARD"
+    ) -> None:
         from Xlib import X, Xatom, display as xdisplay
 
         self._X = X
@@ -60,7 +62,9 @@ class XlibOwnerConnection:
         )
         # Deliberately never mapped: a selection owner needs an address, not a
         # window on screen. This is the whole reason writing stopped flickering.
-        self._clipboard = self._display.get_atom("CLIPBOARD")
+        # CLIPBOARD for Ctrl+V; PRIMARY for middle-click, which the guard
+        # redacts alongside a copy that held a secret.
+        self._selection = self._display.get_atom(selection)
         self._time_prop = self._display.get_atom("SAFEPASTE_TIMESTAMP")
         self._watch_id = None
         if attach:
@@ -156,7 +160,7 @@ class XlibOwnerConnection:
             self._handle(event)
 
     def take_ownership(self, timestamp: int) -> bool:
-        self._window.set_selection_owner(self._clipboard, timestamp)
+        self._window.set_selection_owner(self._selection, timestamp)
         self._display.flush()
         # Asking rather than assuming: SetSelectionOwner has no reply, and a
         # write that silently did not stick would leave the guard believing the
@@ -168,7 +172,7 @@ class XlibOwnerConnection:
         self._display.flush()
 
     def owns_selection(self) -> bool:
-        return self._display.get_selection_owner(self._clipboard) == self._window
+        return self._display.get_selection_owner(self._selection) == self._window
 
     # -- writing properties on the requestor's window ----------------------
 

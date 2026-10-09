@@ -22,18 +22,27 @@ anything:
 copy a secret
       ↓   (the clipboard already holds the redacted text)
 ┌────────────────────────────────────────────┐
-│ ⚠ 2 secrets removed from the clipboard     │
-│   ✓ AWS access token   ✓ GitHub PAT        │
-│   12,481 characters were kept intact.      │
-│   [ Restore original ]  [ OK ]             │
-│   ☐ Never flag this value again            │
+│ 2 secrets removed from the clipboard       │
+│ AWS access token, GitHub PAT               │
+│ 12,481 characters were kept.               │
+│ The original can be restored for 60 s.     │
+│   [ Restore original ]  [ Not a secret ]   │
 └────────────────────────────────────────────┘
 ```
 
-Ignore the dialog, dismiss it by accident, or kill the daemon mid-decision, and
-you are still safe — the swap has already happened. Asking first and replacing
-second would leave the raw secret on the clipboard during precisely the window in
-which you are distracted.
+Ignore the notification, miss it, or kill the daemon mid-decision, and you are
+still safe — the swap has already happened. Asking first and replacing second
+would leave the raw secret on the clipboard during precisely the window in which
+you are distracted.
+
+On Linux the notice is a desktop notification, so it never takes the keyboard:
+both buttons need a click, and whatever you type next still goes where you were
+typing. (Up to 0.11 it was a dialog, and a dialog takes focus — in a terminal,
+Tab, Tab, Enter pressed *Restore original*.) *Not a secret* stops flagging that
+value and puts it back. The selection you copied from is cleaned too: selecting
+text puts it in the middle-click buffer (PRIMARY), so the same secret is redacted
+there at the same moment. On macOS and Windows the notice has no buttons and
+nothing is held for a restore.
 
 Only the value is replaced, never the surrounding text:
 
@@ -61,7 +70,7 @@ cannot print an eight-character password. Short secrets reveal nothing at all.
 
 Other modes are available from Preferences: `notify` (notification only, clipboard
 untouched) and `off`. The config also accepts `ask` (leave the original, ask first),
-but no front end has a dialog that asks yet, so `ask` runs as `redact` everywhere and
+but no front end has a notice that asks yet, so `ask` runs as `redact` everywhere and
 neither the tray nor Preferences offers it.
 
 A copy too large to check completely is never passed as clean: you get a *Clipboard
@@ -128,8 +137,8 @@ pip install git+https://github.com/amigoun/safepaste-linux
 ```
 
 That gives you the CLI and the guard. It deliberately does **not** pull in
-PyGObject, which builds against system GTK headers; on Linux the tray and dialogs
-want `python3-gi` from apt, and `safepaste-daemon` will tell you so rather than
+PyGObject, which builds against system GTK headers; on Linux the tray and
+notifications want `python3-gi` from apt, and `safepaste-daemon` will tell you so rather than
 printing an import traceback.
 
 ## Usage
@@ -267,9 +276,14 @@ out too, because Mutter's bridge is asking the very process that is blocked.
   `text/html` / `CF_HTML` — a link's URL under clean link text — is not caught there
   yet; macOS scans HTML and RTF too.
 - **Rich formatting is dropped when redacting.** Replacing a selection that
-  carried `text/html` leaves plain text only. Safety wins, and the dialog says so.
+  carried `text/html` leaves plain text only. Safety wins, and the notice says so.
   Owning the selection means SafePaste *could* now offer several flavours, but the
   only thing it has to offer is redacted plain text; there is no HTML to rebuild.
+- **The middle-click buffer is cleaned only when you copy.** A secret you select
+  but never copy stays in PRIMARY, and a middle-click pastes it. SafePaste does
+  not watch every selection: taking PRIMARY while you are still selecting would
+  fight you. *Restore original* puts the secret back on the clipboard only;
+  PRIMARY stays redacted.
 - **A redacted clipboard does not outlive the daemon.** SafePaste serves the value
   itself rather than handing it to a `wl-copy` that stays resident, so if the
   daemon exits before you paste, the clipboard is empty rather than holding the

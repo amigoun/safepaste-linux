@@ -241,6 +241,15 @@ class Backend:
 
     # -- optional ----------------------------------------------------------
 
+    def primary_selection(self) -> tuple[ClipboardReader, ClipboardWriter] | None:
+        """A reader and a writer for the X11 PRIMARY selection, where there is one.
+
+        PRIMARY is what a middle-click pastes. Selecting text to copy it puts the
+        same text there, so a copy redacted on the clipboard alone still leaves
+        the secret one click away. Only Linux has it.
+        """
+        return None
+
     def lock_watcher(self) -> LockWatcher | None:
         return None
 

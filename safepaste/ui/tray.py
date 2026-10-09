@@ -1,6 +1,6 @@
 """System-tray indicator, spoken directly over D-Bus.
 
-SafePaste is GTK4 (see `safepaste/ui/dialog.py`), but the only tray protocol
+SafePaste is GTK4 (see `safepaste/ui/prefs.py`), but the only tray protocol
 GNOME Shell actually renders -- StatusNotifierItem -- has no GTK4-native
 binding on this system. The obvious shortcut, `gir1.2-ayatanaappindicator3-
 0.1`, is a GTK3 library end to end: it depends on `gir1.2-gtk-3.0`, and

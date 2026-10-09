@@ -122,6 +122,9 @@ class Sanitised:
     # Anything left out is dropped by the write, secret and all.
     representations: dict[str, str]
     hashes: tuple[str, ...]
+    # Each secret value with a finding to attribute it to, so PRIMARY can be
+    # cleaned of the same values. Never kept past `handle`.
+    sources: dict[str, Finding] = field(default_factory=dict)
 
 
 class Guard:
@@ -159,6 +162,8 @@ class Guard:
         self.detector = self._build_detector()
         self.writer = self.backend.clipboard_writer()
         self.monitor = self.backend.clipboard_monitor(self.handle)
+        # What a middle-click pastes, where the platform has it (Linux).
+        self.primary = self.backend.primary_selection()
         self.locks = self.backend.lock_watcher()
 
         self._paused_until = 0.0
@@ -313,9 +318,10 @@ class Guard:
         # A writer may be holding the selection on our behalf; on Linux the X
         # connection and its main-loop watch belong to it. Shutdown-only, so
         # dropping the clipboard here is the same thing that exiting would do.
-        close = getattr(self.writer, "close", None)
-        if callable(close):
-            close()
+        for owner in (self.writer, *(self.primary or ())):
+            close = getattr(owner, "close", None)
+            if callable(close):
+                close()
         self.forget_original()
 
     # -- the pipeline ------------------------------------------------------
@@ -357,6 +363,10 @@ class Guard:
             if self._write(clean.text, clean.representations, event.flavour):
                 self.last_outcome = REMOVED
                 self.hold_original(event, clean.result.labels)
+                try:
+                    self._redact_primary(clean.sources)
+                except Exception:  # noqa: BLE001 - must not cost the notice
+                    log.exception("failed to check the primary selection")
             else:
                 self.last_outcome = NOT_REMOVED
                 log.error("could not replace the clipboard; it still holds the secret")
@@ -373,6 +383,48 @@ class Guard:
         log.warning("the clipboard was too large to check completely")
         if self.on_incomplete is not None:
             self.on_incomplete(event)
+
+    def _redact_primary(self, sources: dict[str, Finding]) -> None:
+        """Clean PRIMARY of the secrets just removed from the clipboard.
+
+        Selecting text to copy it also puts it on PRIMARY, so without this a
+        middle-click pastes what Ctrl+V no longer can. Done once per copy rather
+        than on every selection: taking PRIMARY while someone is still selecting
+        would fight them. A secret selected but never copied is not covered.
+
+        PRIMARY is redacted for the copy's own values wherever they appear, plus
+        anything its own scan finds, so a selection wider than the copy is still
+        cleaned. Left alone when it holds none of them. Restore does not touch it.
+        """
+        if self.primary is None:
+            return
+        reader, writer = self.primary
+        # Same deadlock as the clipboard: a value we serve must not be fetched
+        # through the X server from this loop.
+        held = writer.current_text() if writer.owns_clipboard() else None
+        event = ClipboardEvent.of(held) if held is not None else reader.read_text()
+        if event is None or not event.text:
+            return
+        text = event.text
+        deadline = time.monotonic() + self.config.regex_timeout * SCAN_BUDGET_TIMEOUTS
+        found = list(self.detector.scan(text, deadline=deadline))
+        values = dict(sources)
+        for f in found:
+            values.setdefault(text[f.start : f.end], f)
+        found = _every_occurrence(text, found, values)
+        if not found:
+            return
+        result = redact(text, found, self.redaction_style)
+        if writer.write(result.text):
+            log.info(
+                "removed %d secret(s) from the primary selection",
+                result.secrets_removed,
+            )
+        else:
+            log.error(
+                "could not replace the primary selection; "
+                "a middle-click still pastes the secret"
+            )
 
     def _sanitise(self, event: ClipboardEvent) -> tuple[Sanitised | None, bool]:
         """Redact every text-bearing representation of `event`, or None if clean,
@@ -479,6 +531,7 @@ class Guard:
             hashes=(
                 tuple(value_hash(v, key) for v in sorted(values)) if key is not None else ()
             ),
+            sources=sources,
         ), incomplete
 
     def _scan_hidden(self, name: str, value: str) -> tuple[str, Any] | None:

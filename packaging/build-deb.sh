@@ -74,7 +74,7 @@ for script in postinst prerm postrm; do
 done
 
 cp packaging/systemd/safepaste.service "$PKGDIR/usr/lib/systemd/user/"
-cp packaging/safepaste.desktop "$PKGDIR/usr/share/applications/"
+cp packaging/dev.safepaste.SafePaste.desktop "$PKGDIR/usr/share/applications/"
 if [ -f README.md ]; then
     cp README.md "$PKGDIR/usr/share/doc/safepaste/"
 fi

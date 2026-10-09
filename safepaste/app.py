@@ -5,7 +5,7 @@ which is why Daemon.start() is separate from Daemon.run(): two GLib main loops i
 one process would fight over the same file descriptors.
 
 It is a background application with no primary window. `hold()` keeps it alive
-without one, and the dialog and preferences window are created on demand. The
+without one, and the preferences window is created on demand. The
 daemon remains fully usable headless — `python -m safepaste.daemon` needs none of
 this — so a broken toolkit cannot take clipboard protection down with it.
 """
@@ -19,12 +19,11 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GLib  # noqa: E402
 
 from . import config as config_mod, hardening
 from .daemon import Daemon
 from .guard import NOT_REMOVED, PARTLY_CHECKED_BODY, PARTLY_CHECKED_TITLE, REMOVED
-from .ui.dialog import present_detection
 
 log = logging.getLogger(__name__)
 
@@ -35,12 +34,17 @@ APP_ID = "dev.safepaste.SafePaste"
 # short enough that it is never mistaken for the current protection state.
 ALERT_FALLBACK_SECS = 20
 
+# The redaction notice has an id of its own, so its expiry withdraws it without
+# taking a warning ("could not be removed") down with it.
+NOTICE_ID = "safepaste-redaction"
+ALERT_ID = "safepaste-detection"
+
 
 class SafePasteApp(Adw.Application):
     def __init__(self, cfg: config_mod.Config | None = None) -> None:
         super().__init__(
             application_id=APP_ID,
-            # No window to open, and we must not exit when the last dialog closes.
+            # No window to open, and we must not exit when the last window closes.
             flags=Gio.ApplicationFlags.DEFAULT_FLAGS,
         )
         self.config = cfg or config_mod.load()
@@ -54,20 +58,13 @@ class SafePasteApp(Adw.Application):
             # made through the tray: a pause over D-Bus used to leave the menu
             # claiming to be guarding.
             on_state_changed=self._refresh_tray,
-            # The dialog reports a redaction and offers the undo; it has no form
+            # The notice reports a redaction and offers the undo; it has no form
             # that leaves the secret and asks, so `ask` redacts here too.
             can_ask=False,
         )
         self.tray = None
         self._prefs_window = None
-        self._current_dialog = None
         self._alert_timer: int | None = None
-        # A window that is never presented, existing only to be the dialogs'
-        # transient parent. SafePaste has no primary window, and GTK complains about
-        # every parentless dialog; this is the cheapest thing that satisfies it.
-        # Deliberately not associated with the application, so it cannot influence
-        # the application's lifecycle.
-        self._dialog_parent: Gtk.Window | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -81,8 +78,6 @@ class SafePasteApp(Adw.Application):
             self.quit()
             return
 
-        self._dialog_parent = Gtk.Window()
-        self._dialog_parent.set_default_size(1, 1)
         self._install_actions()
         self._start_tray()
 
@@ -102,6 +97,11 @@ class SafePasteApp(Adw.Application):
             ("safe-paste", lambda *_: self.daemon.safe_paste()),
             ("preferences", lambda *_: self.show_preferences()),
             ("quit", lambda *_: self.quit()),
+            # The redaction notice's buttons, and its body: a click on the body
+            # would otherwise activate the app and open Preferences.
+            ("restore-original", lambda *_: self._on_restore()),
+            ("not-a-secret", lambda *_: self._on_not_a_secret()),
+            ("dismiss-notice", lambda *_: None),
         ):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", handler)
@@ -167,6 +167,9 @@ class SafePasteApp(Adw.Application):
         self._alert_timer = None
         if self.tray is not None:
             self.tray.clear_alert()
+        # Its Restore button stops working when the window closes; a notice left
+        # in the message list would offer it anyway.
+        self.withdraw_notification(NOTICE_ID)
         return GLib.SOURCE_REMOVE
 
     def _cancel_alert_timer(self) -> None:
@@ -206,7 +209,7 @@ class SafePasteApp(Adw.Application):
         self._show_alert(secrets, removed=outcome == REMOVED)
 
         if outcome == NOT_REMOVED:
-            # The dialog reports a completed redaction; this one did not happen.
+            # The notice reports a completed redaction; this one did not happen.
             noun = "secret" if secrets == 1 else "secrets"
             self._notify_simple(
                 f"{secrets} {noun} could not be removed",
@@ -221,32 +224,39 @@ class SafePasteApp(Adw.Application):
         if mode == "off":
             return
 
-        # In redact mode the clipboard has already been replaced; the dialog
+        # In redact mode the clipboard has already been replaced; the notice
         # reports a completed action and offers the undo.
-        self._present_dialog(result, event)
+        self._present_notice(result, event)
 
-    def _present_dialog(self, result, event) -> None:
-        if self._current_dialog is not None:
-            # A second copy while the first dialog is still open: replace it, so
-            # dialogs cannot stack up faster than they are dismissed.
-            self._current_dialog.destroy()
-            self._current_dialog = None
+    def _present_notice(self, result, event) -> None:
+        """Say what was removed, without taking the keyboard.
 
-        self._current_dialog = present_detection(
-            secrets=result.secrets_removed,
-            labels=result.labels,
-            chars_kept=result.chars_kept,
-            can_restore=self.config.restore_timeout_secs > 0,
-            restore_seconds=self.config.restore_timeout_secs,
-            formatting_lost=getattr(event, "has_rich_flavours", False),
-            parent=self._dialog_parent,
-            on_restore=self._on_restore,
-            on_exclude=self._on_exclude,
-        )
-        self._current_dialog.connect("destroy", self._on_dialog_destroyed)
+        This used to be a dialog, and a dialog takes keyboard focus from the app
+        the user was typing in. Their next keys landed on it: in a terminal,
+        Tab, Tab, Enter (or Down, Down, Enter) pressed "Restore original" and a
+        lone Enter ticked "Never flag this value again" -- the secret came back
+        or was whitelisted by keystrokes meant for something else. A
+        notification never takes focus, so both actions now need a click.
 
-    def _on_dialog_destroyed(self, *_args) -> None:
-        self._current_dialog = None
+        One stable id, so a newer copy's notice replaces the older one rather
+        than leaving a stale Restore button behind it.
+        """
+        secrets = result.secrets_removed
+        noun = "secret" if secrets == 1 else "secrets"
+        note = Gio.Notification.new(f"{secrets} {noun} removed from the clipboard")
+        lines = [_label_summary(result.labels)]
+        lines.append(f"{result.chars_kept:,} characters were kept.")
+        if getattr(event, "has_rich_flavours", False):
+            lines.append("Rich formatting was dropped; the clipboard holds plain text.")
+        seconds = self.config.restore_timeout_secs
+        if seconds > 0:
+            lines.append(f"The original can be restored for {seconds} seconds.")
+            note.add_button("Restore original", "app.restore-original")
+        note.add_button("Not a secret", "app.not-a-secret")
+        note.set_body("\n".join(lines))
+        note.set_default_action("app.dismiss-notice")
+        note.set_priority(Gio.NotificationPriority.HIGH)
+        self.send_notification(NOTICE_ID, note)
 
     def _on_restore(self) -> None:
         if not self.daemon.restore_original():
@@ -255,22 +265,27 @@ class SafePasteApp(Adw.Application):
                 "The original value is no longer being held.",
             )
 
-    def _on_exclude(self) -> None:
+    def _on_not_a_secret(self) -> None:
+        """Stop flagging the value, and give it back where it is still held.
+
+        Both, because a notice button is one click: the dialog had a checkbox
+        to pair with Restore, and once the notice is clicked away nothing else
+        offers the undo.
+        """
         self.daemon.exclude_last_value()
+        if self.config.restore_timeout_secs > 0:
+            self._on_restore()
 
     def _notify(self, secrets: int, labels: tuple[str, ...]) -> None:
         noun = "secret" if secrets == 1 else "secrets"
-        body = ", ".join(labels[:3])
-        if len(labels) > 3:
-            body += f", and {len(labels) - 3} more"
-        self._notify_simple(f"{secrets} {noun} on the clipboard", body)
+        self._notify_simple(f"{secrets} {noun} on the clipboard", _label_summary(labels))
 
     def _notify_simple(self, title: str, body: str) -> None:
         note = Gio.Notification.new(title)
         note.set_body(body)
         note.set_priority(Gio.NotificationPriority.HIGH)
         # A stable id replaces the previous notification instead of stacking.
-        self.send_notification("safepaste-detection", note)
+        self.send_notification(ALERT_ID, note)
 
     # -- preferences -------------------------------------------------------
 
@@ -314,6 +329,13 @@ class SafePasteApp(Adw.Application):
         config_mod.save(self.config)
         self.daemon.reload()
         self._refresh_tray()
+
+
+def _label_summary(labels: tuple[str, ...]) -> str:
+    body = ", ".join(labels[:3])
+    if len(labels) > 3:
+        body += f", and {len(labels) - 3} more"
+    return body
 
 
 def main(argv: list[str] | None = None) -> int:

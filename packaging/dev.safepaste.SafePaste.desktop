@@ -17,3 +17,8 @@ Keywords=clipboard;secret;security;password;credential;privacy;
 # simply raises Preferences instead of starting a second copy -- ordinary
 # GApplication/D-Bus-activation single-instance behaviour keyed on the
 # dev.safepaste.SafePaste application ID.
+#
+# The file name must be that ID plus .desktop. GNOME Shell looks the app up
+# by it before showing any of its notifications and rejects them otherwise
+# ("InvalidApp"), which GLib drops without a word; under the old name,
+# safepaste.desktop, no SafePaste notification ever appeared.

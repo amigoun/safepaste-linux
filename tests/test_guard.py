@@ -891,3 +891,156 @@ def test_a_custom_placeholder_reaches_the_detector(guard_factory) -> None:
     written = backend.writer.writes[-1]
     assert "<<HIDDEN>>" in written
     assert guard.detector.scan(written) == [], "the guard flags its own output"
+
+
+# --- the middle-click selection (PRIMARY) ------------------------------------
+#
+# Selecting text to copy it also puts it on PRIMARY, so a copy redacted on the
+# clipboard alone left the secret one middle-click away. Measured on GNOME 46:
+# two seconds after a copy, CLIPBOARD held the redaction and PRIMARY the
+# original.
+
+GENERIC = "Zx9Qw3Er7Ty1Ui5Op2As8Df4Gh6Jk0Lm"
+GENERIC_COPY = f'api_key = "{GENERIC}"'
+
+
+class FakePrimaryWriter(FakeWriter):
+    def __init__(self, succeed: bool = True, reader: FakeReader | None = None) -> None:
+        super().__init__(succeed, reader)
+        self.held: str | None = None
+
+    def write(self, text: str) -> bool:
+        ok = super().write(text)
+        if ok:
+            self.held = text
+        return ok
+
+    def owns_clipboard(self) -> bool:
+        return self.held is not None
+
+    def current_text(self) -> str | None:
+        return self.held
+
+
+class PrimaryBackend(FakeBackend):
+    def __init__(self, primary: str | None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.primary_reader = FakeReader(
+            ClipboardEvent.of(primary) if primary is not None else None
+        )
+        self.primary_writer = FakePrimaryWriter(True, self.primary_reader)
+
+    def primary_selection(self):
+        return self.primary_reader, self.primary_writer
+
+
+@pytest.fixture
+def primary_guard(tmp_path, monkeypatch):
+    """A Guard on a backend whose PRIMARY selection holds `primary`."""
+    import safepaste.config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "RULES_DIR", tmp_path / "rules")
+
+    def build(primary: str | None, write_succeeds: bool = True, **cfg_kwargs):
+        backend = PrimaryBackend(primary, write_succeeds=write_succeeds)
+        events: list[tuple] = []
+        guard = Guard(
+            Config(**cfg_kwargs).validated(),
+            backend=backend,
+            on_detection=lambda f, r, e: events.append((f, r, e)),
+        )
+        return guard, backend, events
+
+    return build
+
+
+def test_a_redacted_copy_cleans_primary_too(primary_guard) -> None:
+    guard, backend, events = primary_guard(PAYLOAD, mode="redact")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert events
+    assert SECRET not in backend.writer.writes[-1]
+    assert backend.primary_writer.writes, "a middle-click would still paste the secret"
+    assert SECRET not in backend.primary_writer.writes[-1]
+    assert backend.primary_writer.writes[-1].startswith("notes\n")
+
+
+def test_primary_loses_the_copys_values_even_where_its_own_scan_misses(
+    primary_guard,
+) -> None:
+    """A selection can hold the bare value while the copy had its context."""
+    guard, backend, _ = primary_guard(GENERIC, mode="redact")
+    assert guard.detector.scan(GENERIC) == [], "precondition: bare value not flagged"
+
+    guard.handle(ClipboardEvent.of(GENERIC_COPY))
+
+    assert backend.writer.writes, "precondition: the copy itself was redacted"
+    assert backend.primary_writer.writes
+    assert GENERIC not in backend.primary_writer.writes[-1]
+
+
+def test_primary_without_a_secret_is_left_alone(primary_guard) -> None:
+    guard, backend, _ = primary_guard("an ordinary selection", mode="redact")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert backend.writer.writes
+    assert backend.primary_writer.writes == []
+
+
+def test_primary_is_left_alone_when_the_clipboard_is(primary_guard) -> None:
+    """notify leaves the clipboard; a failed write left it too. Neither may
+    report PRIMARY as the only place cleaned."""
+    guard, backend, events = primary_guard(PAYLOAD, mode="notify")
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert events and backend.primary_writer.writes == []
+
+    guard, backend, events = primary_guard(PAYLOAD, mode="redact", write_succeeds=False)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert events and backend.primary_writer.writes == []
+
+
+def test_primary_we_serve_is_not_read_through_the_server(primary_guard) -> None:
+    """The clipboard's deadlock, for PRIMARY: a value this process serves is
+    answered from this loop, so reading it through X would wait for itself."""
+    guard, backend, _ = primary_guard(None, mode="redact")
+    backend.primary_writer.held = PAYLOAD
+
+    def refuse():
+        raise AssertionError("read PRIMARY through the X server while serving it")
+
+    backend.primary_reader.read_text = refuse  # type: ignore[method-assign]
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert SECRET not in backend.primary_writer.writes[-1]
+
+
+def test_a_failing_primary_step_still_reports_the_redaction(primary_guard) -> None:
+    """The clipboard is already clean; the notice saying so must still go out."""
+    guard, backend, events = primary_guard(PAYLOAD, mode="redact")
+
+    def explode():
+        raise RuntimeError("X connection died")
+
+    backend.primary_reader.read_text = explode  # type: ignore[method-assign]
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+
+    assert events
+    assert SECRET not in backend.writer.writes[-1]
+
+
+def test_restore_puts_back_the_clipboard_only(primary_guard) -> None:
+    guard, backend, _ = primary_guard(PAYLOAD, mode="redact", restore_timeout_secs=60)
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert guard.restore_original() is True
+
+    assert backend.writer.writes[-1] == PAYLOAD
+    assert SECRET not in backend.primary_writer.writes[-1]
+
+
+def test_a_backend_without_primary_is_unaffected(guard_factory) -> None:
+    guard, backend, events = guard_factory(mode="redact")
+    assert guard.primary is None
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert events and SECRET not in backend.writer.writes[-1]
