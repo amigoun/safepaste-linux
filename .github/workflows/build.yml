@@ -503,7 +503,7 @@ jobs:
               "safepaste.hotkey", "safepaste.inject", "safepaste.session",
               "safepaste.detector", "safepaste.redactor", "safepaste.config",
               "safepaste.clipboard.monitor", "safepaste.clipboard.writer",
-              "safepaste.ui.dialog", "safepaste.ui.prefs", "safepaste.ui.tray",
+              "safepaste.ui.prefs", "safepaste.ui.tray",
               # The platform seam, the portable policy, and both shells.
               "safepaste.backend", "safepaste.backend.linux", "safepaste.guard",
               "safepaste.service", "safepaste.shell",
@@ -524,7 +524,7 @@ jobs:
           # reports spurious errors about %h and graphical-session.target.
           systemd-analyze --user verify /usr/lib/systemd/user/safepaste.service
           # Exits non-zero on real errors; "hint" lines alone are a pass.
-          desktop-file-validate /usr/share/applications/safepaste.desktop
+          desktop-file-validate /usr/share/applications/dev.safepaste.SafePaste.desktop
 
       - name: Confirm it uninstalls cleanly
         run: |
