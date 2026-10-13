@@ -145,12 +145,15 @@ class Daemon:
     safe_paste = property(lambda self: self.guard.safe_paste)
     restore_original = property(lambda self: self.guard.restore_original)
     exclude_last_value = property(lambda self: self.guard.exclude_last_value)
-    reload = property(lambda self: self.guard.reload)
 
     # Not delegating properties like the rest: every route into these -- the tray,
     # D-Bus, a future extension -- has to end in the same notification, and a
     # `property(lambda ...)` shortcut is exactly how the tray came to reflect only
     # the changes it made itself.
+    def reload(self) -> None:
+        self.guard.reload()
+        self._notify_state_changed()
+
     def set_mode(self, mode: str) -> None:
         self.guard.set_mode(mode)
         self._notify_state_changed()

@@ -5,7 +5,9 @@ which is why Daemon.start() is separate from Daemon.run(): two GLib main loops i
 one process would fight over the same file descriptors.
 
 It is a background application with no primary window. `hold()` keeps it alive
-without one, and the preferences window is created on demand. The
+without one, and the preferences window is created on demand: never at login
+(`--background`, from the systemd unit), where a window would take the keyboard
+from whatever the user is typing in. The
 daemon remains fully usable headless — `python -m safepaste.daemon` needs none of
 this — so a broken toolkit cannot take clipboard protection down with it.
 """
@@ -38,10 +40,17 @@ ALERT_FALLBACK_SECS = 20
 # taking a warning ("could not be removed") down with it.
 NOTICE_ID = "safepaste-redaction"
 ALERT_ID = "safepaste-detection"
+WELCOME_ID = "safepaste-welcome"
+
+# Beside config.toml. Its presence, or a config.toml, means this is not a first
+# run, so the "SafePaste is on" notice shows once rather than at every login.
+WELCOMED_MARKER = "welcome-shown"
 
 
 class SafePasteApp(Adw.Application):
-    def __init__(self, cfg: config_mod.Config | None = None) -> None:
+    def __init__(
+        self, cfg: config_mod.Config | None = None, *, background: bool = False
+    ) -> None:
         super().__init__(
             application_id=APP_ID,
             # No window to open, and we must not exit when the last window closes.
@@ -57,7 +66,7 @@ class SafePasteApp(Adw.Application):
             # So the tray follows the daemon's state rather than only the changes
             # made through the tray: a pause over D-Bus used to leave the menu
             # claiming to be guarding.
-            on_state_changed=self._refresh_tray,
+            on_state_changed=self._on_state_changed,
             # The notice reports a redaction and offers the undo; it has no form
             # that leaves the secret and asks, so `ask` redacts here too.
             can_ask=False,
@@ -65,6 +74,9 @@ class SafePasteApp(Adw.Application):
         self.tray = None
         self._prefs_window = None
         self._alert_timer: int | None = None
+        # Consumed by the first activation; any later one is a deliberate launch.
+        self._background = background
+        self._start_failed = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -75,6 +87,7 @@ class SafePasteApp(Adw.Application):
 
         if not self.daemon.start():
             log.error("clipboard protection could not start")
+            self._start_failed = True
             self.quit()
             return
 
@@ -82,9 +95,34 @@ class SafePasteApp(Adw.Application):
         self._start_tray()
 
     def do_activate(self) -> None:
+        # GApplication still activates after quit() in startup; a window or a
+        # "guarding your clipboard" notice would both be wrong then.
+        if self._start_failed:
+            return
+        if self._background:
+            # Started at login. A window here takes the keyboard from whatever
+            # the user is typing in, and every row saves on the spot.
+            self._background = False
+            self._welcome_once()
+            return
         # Re-launching a background app should show its settings rather than
         # silently doing nothing.
         self.show_preferences()
+
+    def _welcome_once(self) -> None:
+        if not _first_run():
+            return
+        note = Gio.Notification.new("SafePaste is guarding your clipboard")
+        settings = (
+            "Settings are in the tray menu."
+            if self.tray is not None
+            else "Open SafePaste from the app grid to change its settings."
+        )
+        note.set_body(f"Secrets are removed the moment they are copied. {settings}")
+        note.add_button("Settings", "app.preferences")
+        note.set_default_action("app.preferences")
+        self.send_notification(WELCOME_ID, note)
+        _mark_welcomed()
 
     def do_shutdown(self) -> None:
         if self.tray is not None:
@@ -135,6 +173,11 @@ class SafePasteApp(Adw.Application):
         except Exception as exc:  # noqa: BLE001 - the tray is strictly optional
             log.warning("tray failed to start: %s", exc)
             self.tray = None
+
+    def _on_state_changed(self) -> None:
+        self._refresh_tray()
+        if self._prefs_window is not None:
+            self._prefs_window.refresh()
 
     def _refresh_tray(self) -> None:
         if self.tray is None:
@@ -291,6 +334,7 @@ class SafePasteApp(Adw.Application):
 
     def show_preferences(self) -> None:
         if self._prefs_window is not None:
+            self._prefs_window.refresh()
             self._prefs_window.present()
             return
         try:
@@ -327,8 +371,24 @@ class SafePasteApp(Adw.Application):
 
     def _on_config_changed(self) -> None:
         config_mod.save(self.config)
+        # Repaints the tray and this window through _on_state_changed.
         self.daemon.reload()
-        self._refresh_tray()
+
+
+def _first_run() -> bool:
+    return not (
+        config_mod.CONFIG_FILE.exists()
+        or (config_mod.CONFIG_DIR / WELCOMED_MARKER).exists()
+    )
+
+
+def _mark_welcomed() -> None:
+    marker = config_mod.CONFIG_DIR / WELCOMED_MARKER
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker.touch()
+    except OSError as exc:
+        log.warning("cannot record that the welcome was shown (%s); it may repeat", exc)
 
 
 def _label_summary(labels: tuple[str, ...]) -> str:
@@ -347,6 +407,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--config", type=pathlib.Path, help="alternative config file")
+    ap.add_argument(
+        "--background",
+        action="store_true",
+        help="start without opening Preferences (how the systemd unit starts it)",
+    )
     args, rest = ap.parse_known_args(argv if argv is not None else sys.argv[1:])
 
     logging.basicConfig(
@@ -359,7 +424,31 @@ def main(argv: list[str] | None = None) -> int:
     # result is visible, and after the config because refusing ptrace is the
     # user's call -- it costs them the portal.
     hardening.harden(refuse_ptrace=cfg.refuse_ptrace)
-    return SafePasteApp(cfg).run([sys.argv[0], *rest])
+    if args.background and _already_running():
+        # E.g. launched by hand before the unit started. Starting anyway would
+        # activate that copy, which opens Preferences there.
+        log.info("SafePaste is already running; leaving that copy alone")
+        return 0
+    return SafePasteApp(cfg, background=args.background).run([sys.argv[0], *rest])
+
+
+def _already_running() -> bool:
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        reply = bus.call_sync(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NameHasOwner",
+            GLib.Variant("(s)", (APP_ID,)),
+            GLib.VariantType("(b)"),
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+        )
+    except GLib.Error:
+        return False  # run() meets the same bus and reports it
+    return reply.unpack()[0]
 
 
 if __name__ == "__main__":

@@ -1044,3 +1044,32 @@ def test_a_backend_without_primary_is_unaffected(guard_factory) -> None:
     assert guard.primary is None
     guard.handle(ClipboardEvent.of(PAYLOAD))
     assert events and SECRET not in backend.writer.writes[-1]
+
+
+# --- reload ------------------------------------------------------------------
+
+
+def test_reload_keeps_the_config_object_the_front_end_holds(guard_factory) -> None:
+    """The app and its Preferences window hold the guard's Config. reload() used
+    to put a new one in its place, so the next Preferences edit saved the old
+    copy back over a tray mode change, an exclusion and the portal token."""
+    import safepaste.config as config_mod
+
+    guard, _, _ = guard_factory(mode="redact")
+    held = guard.config
+    config_mod.save(held)
+    guard.reload()  # where a Preferences edit ends
+
+    guard.set_mode("notify")  # the tray
+    guard.handle(ClipboardEvent.of(PAYLOAD))
+    assert guard.exclude_last_value() is True  # "Not a secret"
+    guard._store_restore_token("portal-token")
+
+    held.label_rules = True  # the next Preferences edit
+    config_mod.save(held)
+    guard.reload()
+
+    on_disk = config_mod.load()
+    assert guard.config is held
+    assert on_disk.mode == guard.config.mode == "notify"
+    assert on_disk.excluded_hashes and on_disk.portal_restore_token == "portal-token"

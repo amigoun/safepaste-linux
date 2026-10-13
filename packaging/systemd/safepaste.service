@@ -9,7 +9,10 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/safepaste-gui
+# --background: no Preferences window at login. A window that appears then
+# takes the keyboard from whatever the user is already typing in, and every row
+# saves on the spot. Launching SafePaste from the app grid still opens it.
+ExecStart=/usr/bin/safepaste-gui --background
 Restart=on-failure
 RestartSec=5
 

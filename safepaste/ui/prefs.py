@@ -3,7 +3,9 @@
 Mutates the live `Config` object and calls `on_changed` after each edit, so the
 daemon picks changes up immediately rather than at the next restart. Every row
 writes through on toggle — there is no Apply button, which matches how GNOME
-settings behave everywhere else.
+settings behave everywhere else. `refresh()` redraws the rows after a change
+made elsewhere (the tray, D-Bus, a hand-edited file), so a window left open
+never shows, or later saves, an older state.
 """
 
 from __future__ import annotations
@@ -64,6 +66,29 @@ class PreferencesWindow(Adw.PreferencesWindow):
         if not self._loading and self.on_changed is not None:
             self.on_changed()
 
+    def refresh(self) -> None:
+        """Show the config as it is now. Rows already right are left alone, so
+        a refresh caused by this window's own edit cannot move the cursor."""
+        cfg = self.config
+        self._loading = True
+        try:
+            shown = cfg.mode if cfg.mode in SHOWN_MODES else "redact"
+            if SHOWN_MODES[self.mode_row.get_selected()] != shown:
+                self.mode_row.set_selected(SHOWN_MODES.index(shown))
+            if int(self.restore_row.get_value()) != cfg.restore_timeout_secs:
+                self.restore_row.set_value(cfg.restore_timeout_secs)
+            # Compared as the handler stores it, or a trailing space being typed
+            # would be taken away mid-word.
+            if self.placeholder_row.get_text().strip() != cfg.placeholder:
+                self.placeholder_row.set_text(cfg.placeholder)
+            self.label_rules_row.set_active(cfg.label_rules)
+            self.auto_paste_row.set_active(cfg.auto_paste)
+            enabled = cfg.category_set
+            for category, row in self.category_rows.items():
+                row.set_active(category in enabled)
+        finally:
+            self._loading = False
+
     # -- pages -------------------------------------------------------------
 
     def _protection_page(self) -> Adw.PreferencesPage:
@@ -72,8 +97,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         group = Adw.PreferencesGroup(
             title="When a secret reaches the clipboard",
             description=(
-                "Redacting automatically is the safe default: if you ignore the "
-                "dialog and paste anyway, the secret is already gone."
+                "Redacting automatically is the safe default: if you miss the "
+                "notification and paste anyway, the secret is already gone."
             ),
         )
         self.mode_row = Adw.ComboRow(title="Protection")

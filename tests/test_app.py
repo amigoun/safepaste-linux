@@ -20,8 +20,8 @@ def make_app(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
     monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
 
-    def build(**cfg):
-        app = SafePasteApp(config_mod.Config(**cfg).validated())
+    def build(background=False, **cfg):
+        app = SafePasteApp(config_mod.Config(**cfg).validated(), background=background)
         sent: list[str] = []
         withdrawn: list[str] = []
         # Unregistered, the app cannot reach the notification service; record
@@ -107,3 +107,101 @@ def test_the_notice_is_withdrawn_when_restore_ends(make_app) -> None:
     app._on_alert_expired()
     assert withdrawn == [NOTICE_ID]
     assert ALERT_ID != NOTICE_ID
+
+
+# --- start-up --------------------------------------------------------------
+
+
+def _record_preferences(app) -> list[int]:
+    opened: list[int] = []
+    app.show_preferences = lambda: opened.append(1)
+    return opened
+
+
+def test_a_login_start_opens_no_window_and_welcomes_once(make_app) -> None:
+    """The unit starts the app at every login. Preferences opened there took the
+    keyboard from whatever the user was already typing in."""
+    from safepaste.app import WELCOME_ID
+
+    app, sent, _ = make_app(background=True)
+    opened = _record_preferences(app)
+    app.do_activate()
+    assert (opened, sent) == ([], [WELCOME_ID])
+
+    app.do_activate()  # a later launch, from the app grid
+    assert opened == [1]
+
+    next_login, sent_again, _ = make_app(background=True)
+    _record_preferences(next_login)
+    next_login.do_activate()
+    assert sent_again == []
+
+
+def test_an_existing_config_means_no_welcome(make_app, tmp_path) -> None:
+    """Someone upgrading has seen SafePaste before."""
+    (tmp_path / "config.toml").write_text("", encoding="utf-8")
+    app, sent, _ = make_app(background=True)
+    _record_preferences(app)
+    app.do_activate()
+    assert sent == []
+
+
+def test_a_launch_by_hand_opens_preferences(make_app) -> None:
+    app, sent, _ = make_app()
+    opened = _record_preferences(app)
+    app.do_activate()
+    assert (opened, sent) == ([1], [])
+
+
+def test_the_unit_starts_it_in_the_background() -> None:
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    unit = (root / "packaging" / "systemd" / "safepaste.service").read_text()
+    assert "\nExecStart=/usr/bin/safepaste-gui --background\n" in unit
+    # install.sh rewrites the path; replacing the whole line would drop the flag.
+    assert "s|^ExecStart=.*|" not in (root / "install.sh").read_text()
+
+
+# --- one config, and an open window that follows it ------------------------
+
+
+def test_an_open_window_follows_the_tray_and_cannot_revert_it(make_app) -> None:
+    """A Preferences window keeps its rows. After a tray change it showed the
+    old mode, and before the reload fix its next edit wrote the old mode back."""
+    from gi.repository import Adw
+
+    import safepaste.config as config_mod
+    from safepaste.ui.prefs import SHOWN_MODES, PreferencesWindow
+
+    Adw.init()
+    app, _, _ = make_app(mode="redact")
+    window = PreferencesWindow(config=app.config, on_changed=app._on_config_changed)
+    app._prefs_window = window
+    try:
+        window.label_rules_row.set_active(True)  # an edit: save, then reload
+        app.daemon.set_mode("notify")  # the tray
+        assert SHOWN_MODES[window.mode_row.get_selected()] == "notify"
+
+        window.auto_paste_row.set_active(True)  # the next edit
+        assert config_mod.load().mode == app.daemon.config.mode == "notify"
+        assert app.config is app.daemon.config
+    finally:
+        app._prefs_window = None
+        window.destroy()
+
+
+def test_nothing_claims_protection_when_it_could_not_start(
+    make_app, monkeypatch
+) -> None:
+    """GApplication activates even after quit() in startup."""
+    from gi.repository import Adw
+
+    # GTK's own startup needs a registered application; ours is not.
+    monkeypatch.setattr(Adw.Application, "do_startup", lambda _self: None)
+    app, sent, _ = make_app(background=True)
+    opened = _record_preferences(app)
+    app.daemon.start = lambda: False
+    app.do_startup()
+    app.do_activate()
+    assert (opened, sent) == ([], [])

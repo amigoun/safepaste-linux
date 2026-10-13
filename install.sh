@@ -68,8 +68,8 @@ write_shim safepaste-daemon safepaste.service
 write_shim safepaste-gui    safepaste.app
 
 # The unit ships with ExecStart=/usr/bin/safepaste-gui for the packaged layout;
-# point it at this one instead.
-sed "s|^ExecStart=.*|ExecStart=$BINDIR/safepaste-gui|" \
+# point it at this one instead, keeping its arguments.
+sed "s|^ExecStart=/usr/bin/safepaste-gui|ExecStart=$BINDIR/safepaste-gui|" \
     "$REPO/packaging/systemd/safepaste.service" > "$UNITDIR/safepaste.service"
 # Named after the application ID, which GNOME requires before it will show the
 # app's notifications. Earlier installs wrote safepaste.desktop; drop it, or the

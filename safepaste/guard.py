@@ -722,7 +722,12 @@ class Guard:
             log.info("protection resumed")
 
     def reload(self) -> None:
-        self.config = config_mod.load()
+        # In place, not rebound: the front end and its Preferences window hold
+        # this same object. A new one split them, and the next Preferences edit
+        # saved the stale copy over tray modes, exclusions and the portal token.
+        fresh = config_mod.load()
+        for f in dataclasses.fields(fresh):
+            setattr(self.config, f.name, getattr(fresh, f.name))
         for warning in self.config._warnings:
             log.warning("config: %s", warning)
         self.detector = self._build_detector()

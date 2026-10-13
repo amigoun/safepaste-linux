@@ -96,7 +96,9 @@ sudo apt install ./safepaste_*_all.deb
 ```
 
 The package enables a **systemd user unit**, so protection starts at your next
-login. To start it in the session you already have open:
+login, without opening a window: a one-time notification says it is on, and
+Preferences opens when you launch SafePaste from the app grid. To start it in
+the session you already have open:
 
 ```sh
 systemctl --user start safepaste.service
