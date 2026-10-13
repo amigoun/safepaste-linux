@@ -30,8 +30,8 @@ class Safepaste < Formula
 
   desc "Clipboard secret-guard: redacts credentials before they can be pasted"
   homepage "https://github.com/amigoun/safepaste-linux"
-  url "https://github.com/amigoun/safepaste-linux/archive/refs/tags/v0.12.0.tar.gz"
-  sha256 "756f298b6acc7adb7be6c17713706fef7ccf12ab6fda5df2a23852422b718dab"
+  url "https://github.com/amigoun/safepaste-linux/archive/refs/tags/v0.13.0.tar.gz"
+  sha256 "d7c893319b8118b15e466a6a3ca9b9e55a8776ce380d9d9be8100f7fece8c069"
   license "MIT"
   head "https://github.com/amigoun/safepaste-linux.git", branch: "main"
 
