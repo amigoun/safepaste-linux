@@ -172,7 +172,7 @@ $ printf 'hunter2' | safepaste hash          # for hand-writing an exclusion
 hmac-sha256:eaea80387563e7a3765f0ca373b2a37c354de218d2c2f01082e773f3806f7151
 
 $ safepaste --version                       # and the same on safepaste-daemon
-safepaste 0.12.0
+safepaste 0.13.0
 ```
 
 `safepaste-daemon --version` answers before it works out which front end to
@@ -521,7 +521,7 @@ bug report.
 ```sh
 python3 -m venv --system-site-packages .venv   # for the distro's PyGObject/GTK4
 .venv/bin/pip install regex python-xlib pytest
-.venv/bin/python -m pytest -q                  # 653 tests
+.venv/bin/python -m pytest -q                  # 670 tests
 ```
 
 `--system-site-packages` is required: GTK4 and libadwaita come from the distro's
